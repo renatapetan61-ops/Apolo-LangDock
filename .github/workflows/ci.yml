@@ -18,7 +18,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r apps/api/requirements.txt
-      - run: python -m compileall -q apps/api/app
+      - run: python -m compileall -q apps/api
+      - run: cd apps/api && pytest -q
 
   web:
     runs-on: ubuntu-latest
