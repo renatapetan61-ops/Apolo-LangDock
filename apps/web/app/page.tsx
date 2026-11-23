@@ -1,8 +1,17 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 type Message = { role: "user" | "assistant"; content: string };
+type Model = { id: string; provider: string; label: string; free?: boolean | null; availability: string };
+
+const fallbackModels: Model[] = [
+  { id: "openrouter/openrouter/free", provider: "openrouter", label: "OpenRouter Free Router (rota variável)", availability: "quota-dependent" },
+  { id: "google/gemini-2.5-flash", provider: "google", label: "Gemini 2.5 Flash (verifique a cota)", availability: "provider-quota-or-billing" },
+  { id: "ollama/llama3.2", provider: "ollama", label: "Llama 3.2 via Ollama local", availability: "local" },
+  { id: "openai/gpt-4.1-mini", provider: "openai", label: "GPT-4.1 mini (pode ter cobrança)", availability: "provider-quota-or-billing" },
+  { id: "anthropic/claude-3-5-haiku-latest", provider: "anthropic", label: "Claude Haiku (pode ter cobrança)", availability: "provider-quota-or-billing" }
+];
 
 const modules = [
   ["Modelos de IA", "Catálogo unificado de provedores, seleção de modelos e cotas gratuitas."],
@@ -16,9 +25,31 @@ const modules = [
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState("openrouter/openrouter/free");
+  const [models, setModels] = useState<Model[]>(fallbackModels);
+  const [discovery, setDiscovery] = useState("Carregando catálogo...");
   const [messages, setMessages] = useState<Message[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("Configure uma chave de provedor no servidor para começar a conversar.");
+
+  useEffect(() => {
+    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    fetch(base + "/api/v1/models")
+      .then(async response => {
+        if (!response.ok) throw new Error("Não foi possível consultar o catálogo.");
+        return response.json();
+      })
+      .then(data => {
+        const live: Model[] = Array.isArray(data.models) ? data.models : [];
+        if (live.length) {
+          setModels(live);
+          setModel(current => live.some(item => item.id === current) ? current : live[0].id);
+          setDiscovery(`${live.length} modelos encontrados nos provedores configurados.`);
+        } else {
+          setDiscovery("Nenhum modelo detectado. Configure as chaves no servidor ou inicie o Ollama.");
+        }
+      })
+      .catch(() => setDiscovery("Catálogo dinâmico indisponível; exibindo opções conhecidas como referência."));
+  }, []);
 
   async function send(event?: FormEvent) {
     event?.preventDefault();
@@ -71,14 +102,11 @@ export default function Home() {
         </section>
         <section className="card" style={{ marginTop: 24 }}>
           <h2 style={{ marginTop: 0 }}>Chat multimodelo</h2>
-          <label htmlFor="model" style={{ color: "#9aa5bd", fontSize: 13 }}>Modelo</label>
+          <label htmlFor="model" style={{ color: "#9aa5bd", fontSize: 13 }}>Modelo descoberto automaticamente</label>
           <select id="model" value={model} onChange={e => setModel(e.target.value)} disabled={busy} style={{ display: "block", marginTop: 8, padding: 10, background: "#090b14", color: "white", border: "1px solid #343b50", borderRadius: 8, width: "100%" }}>
-            <option value="openrouter/openrouter/free">OpenRouter Free Router (cota sujeita ao provedor)</option>
-            <option value="google/gemini-2.5-flash">Gemini 2.5 Flash (verifique a cota da conta)</option>
-            <option value="ollama/llama3.2">Llama 3.2 via Ollama local</option>
-            <option value="openai/gpt-4.1-mini">GPT-4.1 mini (chave e cobrança)</option>
-            <option value="anthropic/claude-3-5-haiku-latest">Claude Haiku (chave e cobrança)</option>
+            {models.map(item => <option key={item.id} value={item.id}>{item.label} — {item.provider}{item.free === true ? " · grátis/rota local" : ""}</option>)}
           </select>
+          <p className="note">{discovery}</p>
           <div aria-live="polite" style={{ display: "grid", gap: 12, marginTop: 18 }}>
             {messages.map((message, index) => <div key={index} style={{ background: message.role === "user" ? "#24203d" : "#0b0e17", border: "1px solid #242b3d", borderRadius: 12, padding: 14, whiteSpace: "pre-wrap" }}><strong style={{ display: "block", fontSize: 12, color: "#b7aaff", marginBottom: 6 }}>{message.role === "user" ? "Você" : "APOLO"}</strong>{message.content}</div>)}
           </div>
