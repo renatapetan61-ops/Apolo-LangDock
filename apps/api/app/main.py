@@ -21,6 +21,10 @@ PROVIDER_INFO = {
     "openai": ("OpenAI", "API billing may apply; check the account and model price."),
     "anthropic": ("Anthropic", "API billing may apply; check the account and model price."),
     "ollama": ("Ollama (local)", "Local inference; hardware and electricity are the user's responsibility."),
+    "groq": ("Groq", "API quota and billing depend on the account and model."),
+    "deepseek": ("DeepSeek", "API quota and billing depend on the account and model."),
+    "mistral": ("Mistral AI", "API quota and billing depend on the account and model."),
+    "xai": ("xAI", "API quota and billing depend on the account and model."),
 }
 
 class ChatMessage(BaseModel):
@@ -41,8 +45,20 @@ class ChatRequest(BaseModel):
     max_tokens: int | None = Field(default=1024, ge=1, le=32768)
 
 def _key(provider: str) -> str | None:
-    return {"openrouter": os.getenv("OPENROUTER_API_KEY"), "google": os.getenv("GOOGLE_API_KEY"), "openai": os.getenv("OPENAI_API_KEY"), "anthropic": os.getenv("ANTHROPIC_API_KEY")}.get(provider)
+    return {"openrouter": os.getenv("OPENROUTER_API_KEY"), "google": os.getenv("GOOGLE_API_KEY"), "openai": os.getenv("OPENAI_API_KEY"), "anthropic": os.getenv("ANTHROPIC_API_KEY"), "groq": os.getenv("GROQ_API_KEY"), "deepseek": os.getenv("DEEPSEEK_API_KEY"), "mistral": os.getenv("MISTRAL_API_KEY"), "xai": os.getenv("XAI_API_KEY")}.get(provider)
 
+OPENAI_COMPATIBLE_BASES = {
+    "openai": "https://api.openai.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "ollama": "http://host.docker.internal:11434/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "deepseek": "https://api.deepseek.com",
+    "mistral": "https://api.mistral.ai/v1",
+    "xai": "https://api.x.ai/v1",
+}
+
+def _compatible_base(provider: str) -> str:
+    return os.getenv(provider.upper() + "_BASE_URL", OPENAI_COMPATIBLE_BASES[provider]).rstrip("/")
 def _configured(provider: str) -> bool:
     return bool(_key(provider)) if provider != "ollama" else True
 
@@ -82,6 +98,9 @@ async def _discover(provider: str) -> list[dict[str, Any]]:
         if provider == "anthropic":
             data = await _get_json("https://api.anthropic.com/v1/models", {"x-api-key": key or "", "anthropic-version": "2023-06-01"})
             return [_model(provider, item["id"], item.get("display_name") or item["id"]) for item in data.get("data", [])]
+        if provider in {"groq", "deepseek", "mistral", "xai"}:
+            data = await _get_json(_compatible_base(provider) + "/models", {"Authorization": f"Bearer {key}"})
+            return [_model(provider, item["id"], item.get("name") or item["id"]) for item in data.get("data", []) if isinstance(item, dict) and isinstance(item.get("id"), str)]
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         return []
     return []
@@ -131,10 +150,10 @@ async def chat_completions(request: ChatRequest, http_request: Request):
     _check_workspace_quota(http_request)
     usage_started = time.monotonic()
 
-    if provider in {"openrouter", "openai", "ollama"}:
+    if provider in {"openrouter", "openai", "ollama", "groq", "deepseek", "mistral", "xai"}:
         if provider != "ollama" and not _key(provider):
             raise HTTPException(status_code=503, detail=f"Configure {provider.upper()} credentials on the server.")
-        base = {"openrouter": "https://openrouter.ai/api/v1", "openai": "https://api.openai.com/v1", "ollama": os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")}[provider]
+        base = _compatible_base(provider)
         result = await _post_openai_compatible(base, _key(provider), model, body)
     elif provider == "google":
         key = _key(provider)
@@ -447,8 +466,7 @@ async def chat_stream(request: ChatRequest, http_request: Request):
     if provider in {"openrouter","openai","ollama"}:
         if provider!="ollama" and not _key(provider):
             raise HTTPException(status_code=503,detail=f"Configure {provider.upper()} credentials on the server.")
-        base={"openrouter":"https://openrouter.ai/api/v1","openai":"https://api.openai.com/v1",
-              "ollama":os.getenv("OLLAMA_BASE_URL","http://host.docker.internal:11434/v1")}[provider]
+        base=_compatible_base(provider)
         generator=_openai_stream(base,_key(provider),model,body)
     elif provider=="anthropic":
         generator=_anthropic_stream(model,request.messages,request.max_tokens or 1024,request.temperature or 0.7)
