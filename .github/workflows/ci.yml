@@ -36,6 +36,36 @@ jobs:
       - run: npm install
       - run: npm run build
 
+  postgres-migration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: apolo
+          POSTGRES_PASSWORD: apolo-ci-password
+          POSTGRES_DB: apolo_migration
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apolo -d apolo_migration"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      APOLO_DB_PATH: /tmp/apolo-migration.sqlite3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r apps/api/requirements.txt
+      - name: Initialize a representative SQLite schema
+        working-directory: apps/api
+        run: python -c "import app.main"
+      - name: Migrate SQLite schema and data to PostgreSQL
+        run: python scripts/migrate_sqlite_to_postgres.py --sqlite /tmp/apolo-migration.sqlite3 --database-url postgresql://apolo:apolo-ci-password@localhost:5432/apolo_migration
+
   mcp-server:
     runs-on: ubuntu-latest
     defaults:
