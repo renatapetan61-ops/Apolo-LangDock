@@ -329,3 +329,59 @@ def test_mcp_bearer_credentials_are_encrypted_and_hidden(monkeypatch):
     with __import__("app.main", fromlist=["_db"])._db() as conn:
         row = conn.execute("SELECT auth_ciphertext FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
     assert row["auth_ciphertext"] is None
+
+
+def test_workspace_api_keys_public_chat_scopes_and_revocation(monkeypatch):
+    headers = workspace_headers()
+    created = client.post("/api/v1/api-keys", headers=headers, json={
+        "name": "Integração CI", "scopes": ["chat:completions", "models:read"], "expires_in_days": 30
+    })
+    assert created.status_code == 200
+    key = created.json()["api_key"]
+    key_headers = {"X-API-Key": key}
+    listed = client.get("/api/v1/api-keys", headers=headers)
+    assert listed.status_code == 200
+    assert key not in listed.text
+    assert listed.json()["api_keys"][0]["key_prefix"] == created.json()["key_prefix"]
+
+    async def fake_models():
+        return {"models": [{"id": "ollama/demo"}], "discovery": "test"}
+    async def fake_chat(payload, request):
+        return {"choices": [{"message": {"role": "assistant", "content": "API key response"}}]}
+
+    monkeypatch.setattr("app.main.models", fake_models)
+    monkeypatch.setattr("app.main.chat_completions", fake_chat)
+    model_result = client.get("/api/v1/public/models", headers=key_headers)
+    assert model_result.status_code == 200
+    chat_result = client.post("/api/v1/public/chat/completions", headers=key_headers, json={
+        "model": "ollama/demo", "messages": [{"role": "user", "content": "Hello"}]
+    })
+    assert chat_result.status_code == 200
+    assert chat_result.json()["choices"][0]["message"]["content"] == "API key response"
+    events = client.get("/api/v1/audit-logs", headers=headers).json()["events"]
+    assert any(item["action"] == "api_key.created" for item in events)
+    assert any(item["action"] == "api_key.chat" for item in events)
+
+    revoked = client.delete(f"/api/v1/api-keys/{created.json()['id']}", headers=headers)
+    assert revoked.status_code == 200
+    assert client.get("/api/v1/public/models", headers=key_headers).status_code == 401
+
+
+def test_api_key_scopes_and_rate_limit(monkeypatch):
+    headers = workspace_headers()
+    chat_only = client.post("/api/v1/api-keys", headers=headers, json={
+        "name": "Somente chat", "scopes": ["chat:completions"]
+    }).json()["api_key"]
+    assert client.get("/api/v1/public/models", headers={"X-API-Key": chat_only}).status_code == 403
+
+    monkeypatch.setenv("APOLO_API_KEY_RPM", "1")
+    read_key = client.post("/api/v1/api-keys", headers=headers, json={
+        "name": "Leitura limitada", "scopes": ["models:read"]
+    }).json()["api_key"]
+    key_headers = {"X-API-Key": read_key}
+    async def fake_models():
+        return {"models": [], "discovery": "test"}
+    monkeypatch.setattr("app.main.models", fake_models)
+    assert client.get("/api/v1/public/models", headers=key_headers).status_code == 200
+    limited = client.get("/api/v1/public/models", headers=key_headers)
+    assert limited.status_code == 429
