@@ -641,3 +641,103 @@ async def list_agent_runs(request: Request):
         rows = conn.execute("SELECT * FROM agent_runs WHERE workspace_id=? ORDER BY created_at DESC LIMIT 50",
                             (request.state.workspace_id,)).fetchall()
     return {"runs": [{**dict(row), "agent_ids": _json.loads(row["agent_ids"]), "trace": _json.loads(row["trace"])} for row in rows]}
+
+
+with _db() as conn:
+    conn.execute("""CREATE TABLE IF NOT EXISTS workflow_runs(
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workflow_id TEXT NOT NULL,
+        status TEXT NOT NULL, input TEXT NOT NULL, output TEXT NOT NULL DEFAULT '',
+        trace TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
+    )""")
+
+@app.post("/api/v1/workflows/{workflow_id}/run")
+async def run_workflow(workflow_id: str, payload: dict = Body(...), request: Request = None):
+    user_input = payload.get("input")
+    if not isinstance(user_input, str) or not user_input.strip() or len(user_input) > 20000:
+        raise HTTPException(status_code=422, detail="A workflow input of 1-20000 characters is required.")
+    with _db() as conn:
+        workflow = conn.execute("SELECT * FROM workflows WHERE id=? AND workspace_id=?",
+                                (workflow_id, request.state.workspace_id)).fetchone()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    definition = _json.loads(workflow["definition"])
+    nodes, edges = definition.get("nodes"), definition.get("edges")
+    if not isinstance(nodes, list) or not 1 <= len(nodes) <= 20 or not isinstance(edges, list) or len(edges) > 30:
+        raise HTTPException(status_code=422, detail="Workflow must contain 1-20 nodes and at most 30 edges.")
+    by_id = {}
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str) or node["id"] in by_id:
+            raise HTTPException(status_code=422, detail="Every node needs a unique string ID.")
+        if node.get("type") not in {"input", "prompt", "model", "output"}:
+            raise HTTPException(status_code=422, detail="Unsupported workflow node type.")
+        by_id[node["id"]] = node
+    incoming = {node_id: [] for node_id in by_id}
+    outgoing = {node_id: [] for node_id in by_id}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            raise HTTPException(status_code=422, detail="Invalid workflow edge.")
+        source, target = edge.get("source"), edge.get("target")
+        if source not in by_id or target not in by_id or source == target:
+            raise HTTPException(status_code=422, detail="Workflow edges must reference distinct existing nodes.")
+        outgoing[source].append(target)
+        incoming[target].append(source)
+    ready = [node_id for node_id in by_id if not incoming[node_id]]
+    order = []
+    remaining = {key: list(value) for key, value in incoming.items()}
+    while ready:
+        current = ready.pop(0)
+        order.append(current)
+        for target in outgoing[current]:
+            remaining[target].remove(current)
+            if not remaining[target]:
+                ready.append(target)
+    if len(order) != len(by_id):
+        raise HTTPException(status_code=422, detail="Workflow contains a cycle.")
+    input_nodes = [node for node in nodes if node["type"] == "input"]
+    if len(input_nodes) != 1:
+        raise HTTPException(status_code=422, detail="A workflow must have exactly one input node.")
+    values, trace = {}, []
+    run_id, created = str(uuid.uuid4()), _now()
+    try:
+        for node_id in order:
+            node = by_id[node_id]
+            config = node.get("config") if isinstance(node.get("config"), dict) else {}
+            previous = "\n\n".join(values[item] for item in incoming[node_id] if item in values)
+            node_type = node["type"]
+            if node_type == "input":
+                value = user_input
+            elif node_type == "prompt":
+                instruction = str(config.get("instructions") or "")[:12000]
+                value = (instruction + "\n\n" + previous).strip()
+            elif node_type == "model":
+                selected_model = config.get("model")
+                if not isinstance(selected_model, str) or "/" not in selected_model:
+                    raise HTTPException(status_code=422, detail="Every model node needs a provider/model ID.")
+                system_prompt = str(config.get("system") or "Follow the workflow instructions and produce the requested result.")[:12000]
+                result = await chat_completions(ChatRequest(model=selected_model, messages=[
+                    ChatMessage(role="system", content=system_prompt),
+                    ChatMessage(role="user", content=previous or user_input)
+                ]), request)
+                value = result["choices"][0]["message"]["content"]
+            else:
+                value = previous or user_input
+            values[node_id] = value
+            trace.append({"node_id": node_id, "type": node_type, "status": "completed"})
+        output_nodes = [node["id"] for node in nodes if node["type"] == "output"]
+        output = "\n\n".join(values[item] for item in output_nodes) if output_nodes else values[order[-1]]
+        with _db() as conn:
+            conn.execute("INSERT INTO workflow_runs(id,workspace_id,workflow_id,status,input,output,trace,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (run_id, request.state.workspace_id, workflow_id, "completed", user_input, output, _json.dumps(trace), created))
+        return {"run_id": run_id, "status": "completed", "output": output, "trace": trace}
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=502, detail="Workflow execution failed.") from exc
+
+
+@app.get("/api/v1/workflow-runs")
+async def list_workflow_runs(request: Request):
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM workflow_runs WHERE workspace_id=? ORDER BY created_at DESC LIMIT 50",
+                            (request.state.workspace_id,)).fetchall()
+    return {"runs": [dict(row, trace=_json.loads(row["trace"])) for row in rows]}
