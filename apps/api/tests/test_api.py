@@ -1,13 +1,25 @@
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
-
 from app.main import app
 
 client = TestClient(app)
+
+
+def workspace_headers():
+    email = f"user-{uuid.uuid4().hex}@example.test"
+    password = "Correct-Horse-Battery-42!"
+    registered = client.post("/api/v1/auth/register", json={"email": email, "password": password})
+    assert registered.status_code == 200
+    token = registered.json()["access_token"]
+    auth = {"Authorization": f"Bearer {token}"}
+    created = client.post("/api/v1/workspaces", headers=auth, json={"name": "Workspace de teste"})
+    assert created.status_code == 200
+    return {**auth, "X-Workspace-ID": created.json()["id"]}
 
 
 def test_health_endpoint():
@@ -24,8 +36,17 @@ def test_provider_catalog_never_claims_paid_apis_are_free():
     assert "billing" in by_id["anthropic"]["free_policy"].lower()
 
 
-def test_chat_rejects_unknown_provider():
-    response = client.post("/api/v1/chat/completions", json={
+def test_private_resources_require_identity_and_workspace():
+    assert client.get("/api/v1/conversations").status_code == 401
+    headers = workspace_headers()
+    assert client.get("/api/v1/conversations", headers=headers).status_code == 200
+    without_workspace = {"Authorization": headers["Authorization"]}
+    assert client.get("/api/v1/conversations", headers=without_workspace).status_code == 400
+
+
+def test_chat_rejects_unknown_provider_after_workspace_auth():
+    headers = workspace_headers()
+    response = client.post("/api/v1/chat/completions", headers=headers, json={
         "model": "unknown/model",
         "messages": [{"role": "user", "content": "hello"}],
     })
@@ -33,7 +54,8 @@ def test_chat_rejects_unknown_provider():
 
 
 def test_chat_rejects_invalid_role():
-    response = client.post("/api/v1/chat/completions", json={
+    headers = workspace_headers()
+    response = client.post("/api/v1/chat/completions", headers=headers, json={
         "model": "ollama/llama3.2",
         "messages": [{"role": "tool", "content": "hello"}],
     })
@@ -54,45 +76,63 @@ def test_live_model_discovery_uses_provider_adapter(monkeypatch):
     assert any(model["id"] == "ollama/qwen2.5" for model in payload["models"])
 
 
-def test_conversation_persistence_and_delete():
-    created = client.post("/api/v1/conversations", json={"title":"Persistência de teste","model":"ollama/qwen2.5"})
+def test_conversation_persistence_and_workspace_isolation():
+    owner_headers = workspace_headers()
+    other_headers = workspace_headers()
+    created = client.post("/api/v1/conversations", headers=owner_headers,
+                          json={"title": "Persistência de teste", "model": "ollama/qwen2.5"})
     assert created.status_code == 200
     conversation_id = created.json()["id"]
-    saved = client.post(f"/api/v1/conversations/{conversation_id}/messages", json={"role":"user","content":"Olá"})
+    saved = client.post(f"/api/v1/conversations/{conversation_id}/messages", headers=owner_headers,
+                        json={"role": "user", "content": "Olá"})
     assert saved.status_code == 200
-    history = client.get(f"/api/v1/conversations/{conversation_id}/messages")
+    history = client.get(f"/api/v1/conversations/{conversation_id}/messages", headers=owner_headers)
     assert history.status_code == 200
     assert history.json()["messages"][0]["content"] == "Olá"
-    assert client.delete(f"/api/v1/conversations/{conversation_id}").json()["deleted"] is True
+    assert client.get("/api/v1/conversations", headers=other_headers).json()["conversations"] == []
+    assert client.get(f"/api/v1/conversations/{conversation_id}/messages", headers=other_headers).status_code == 404
+    assert client.delete(f"/api/v1/conversations/{conversation_id}", headers=other_headers).status_code == 404
+    assert client.delete(f"/api/v1/conversations/{conversation_id}", headers=owner_headers).json()["deleted"] is True
 
-def test_agent_and_workflow_registry():
-    agent = client.post("/api/v1/agents", json={"name":"Assistente de teste","instructions":"Responda com clareza","tools":[]})
+
+def test_agent_and_workflow_registry_are_workspace_scoped():
+    headers = workspace_headers()
+    other = workspace_headers()
+    agent = client.post("/api/v1/agents", headers=headers,
+                        json={"name": "Assistente de teste", "instructions": "Responda com clareza", "tools": []})
     assert agent.status_code == 200
-    assert any(item["id"] == agent.json()["id"] for item in client.get("/api/v1/agents").json()["agents"])
-    workflow = client.post("/api/v1/workflows", json={"name":"Fluxo de teste","definition":{"nodes":[],"edges":[]}})
+    assert any(item["id"] == agent.json()["id"] for item in client.get("/api/v1/agents", headers=headers).json()["agents"])
+    assert client.get("/api/v1/agents", headers=other).json()["agents"] == []
+    workflow = client.post("/api/v1/workflows", headers=headers,
+                           json={"name": "Fluxo de teste", "definition": {"nodes": [], "edges": []}})
     assert workflow.status_code == 200
-    assert any(item["id"] == workflow.json()["id"] for item in client.get("/api/v1/workflows").json()["workflows"])
+    assert any(item["id"] == workflow.json()["id"] for item in client.get("/api/v1/workflows", headers=headers).json()["workflows"])
+    assert client.get("/api/v1/workflows", headers=other).json()["workflows"] == []
 
 
 def test_register_login_and_workspace_membership():
-    email = f"user-{__import__('uuid').uuid4().hex[:10]}@example.test"
+    email = f"user-{uuid.uuid4().hex[:10]}@example.test"
     password = "Correct-Horse-Battery-42!"
-    registered = client.post("/api/v1/auth/register", json={"email":email,"password":password})
+    registered = client.post("/api/v1/auth/register", json={"email": email, "password": password})
     assert registered.status_code == 200
     token = registered.json()["access_token"]
-    headers = {"Authorization":f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"}
     assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
-    created = client.post("/api/v1/workspaces", headers=headers, json={"name":"Equipe APOLO"})
+    created = client.post("/api/v1/workspaces", headers=headers, json={"name": "Equipe APOLO"})
     assert created.status_code == 200
     listed = client.get("/api/v1/workspaces", headers=headers)
     assert listed.status_code == 200
     assert listed.json()["workspaces"][0]["name"] == "Equipe APOLO"
     assert client.get("/api/v1/workspaces").status_code == 401
-    logged_in = client.post("/api/v1/auth/login", json={"email":email,"password":password})
+    logged_in = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert logged_in.status_code == 200
-    assert client.post("/api/v1/auth/login", json={"email":email,"password":"wrong-password"}).status_code == 401
+    assert client.post("/api/v1/auth/login", json={"email": email, "password": "wrong-password"}).status_code == 401
+
 
 def test_stream_endpoint_requires_provider_credentials(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    response = client.post("/api/v1/chat/stream", json={"model":"openai/gpt-test","messages":[{"role":"user","content":"hello"}]})
+    headers = workspace_headers()
+    response = client.post("/api/v1/chat/stream", headers=headers, json={
+        "model": "openai/gpt-test", "messages": [{"role": "user", "content": "hello"}]
+    })
     assert response.status_code == 503
