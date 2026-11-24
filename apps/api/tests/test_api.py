@@ -710,3 +710,28 @@ def test_streaming_usage_is_recorded_and_attributed_to_api_key(monkeypatch):
     assert (row["prompt_tokens"],row["completion_tokens"],row["total_tokens"],row["status"]) == (7,5,12,"succeeded")
     usage = client.get("/api/v1/api-keys/"+created_key["id"]+"/usage",headers=headers)
     assert usage.status_code == 200
+
+
+def test_additional_openai_compatible_providers_discover_and_chat(monkeypatch):
+    from app.main import _compatible_base, _key, _discover
+    import asyncio
+    expected = {
+        "groq": "https://api.groq.com/openai/v1",
+        "deepseek": "https://api.deepseek.com",
+        "mistral": "https://api.mistral.ai/v1",
+        "xai": "https://api.x.ai/v1",
+    }
+    for provider, base in expected.items():
+        monkeypatch.setenv(provider.upper()+"_API_KEY", "test-"+provider)
+        assert _key(provider) == "test-"+provider
+        assert _compatible_base(provider) == base
+    calls = []
+    async def fake_get_json(url, headers=None, params=None):
+        calls.append((url, headers))
+        return {"data":[{"id":"model-test","name":"Test model"}]}
+    monkeypatch.setattr("app.main._get_json", fake_get_json)
+    for provider, base in expected.items():
+        found = asyncio.run(_discover(provider))
+        assert found[0]["id"] == provider+"/model-test"
+        assert calls[-1][0] == base+"/models"
+        assert calls[-1][1]["Authorization"] == "Bearer test-"+provider
