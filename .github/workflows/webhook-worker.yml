@@ -1,0 +1,39 @@
+name: APOLO webhook queue worker
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apolo-webhook-worker
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch due webhook deliveries
+        env:
+          WORKER_URL: ${{ secrets.APOLO_WEBHOOK_WORKER_URL }}
+          WORKER_TOKEN: ${{ secrets.APOLO_WEBHOOK_WORKER_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$WORKER_URL" || -z "$WORKER_TOKEN" ]]; then
+            echo "Webhook worker secrets are not configured; skipping."
+            exit 0
+          fi
+          case "$WORKER_URL" in
+            https://*) ;;
+            *) echo "WORKER_URL must use HTTPS." >&2; exit 1 ;;
+          esac
+          curl --fail-with-body --silent --show-error \
+            --max-time 45 \
+            --request POST \
+            --header "X-APOLO-Worker-Token: $WORKER_TOKEN" \
+            "$WORKER_URL/internal/webhooks/dispatch?limit=25"
