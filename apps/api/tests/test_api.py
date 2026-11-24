@@ -417,3 +417,30 @@ def test_usage_quota_limits_validation_and_workspace_isolation():
     assert client.put("/api/v1/usage/limits", headers=headers,
                       json={"monthly_token_limit": 0}).status_code == 422
     assert client.get("/api/v1/usage/summary", headers=other).json()["totals"]["tokens"] == 0
+
+
+def test_workspace_rbac_member_management_and_owner_protection():
+    owner = workspace_headers()
+    workspace_id = owner["X-Workspace-ID"]
+    email = f"member-{uuid.uuid4().hex}@example.test"
+    registered = client.post("/api/v1/auth/register", json={
+        "email": email, "password": "Correct-Horse-Battery-42!"
+    })
+    assert registered.status_code == 200
+    member_id = registered.json()["user"]["id"]
+    added = client.post("/api/v1/workspace/members", headers=owner,
+                        json={"user_id": member_id, "role": "member"})
+    assert added.status_code == 200
+    assert any(item["user_id"] == member_id for item in
+               client.get("/api/v1/workspace/members", headers=owner).json()["members"])
+
+    member_token = registered.json()["access_token"]
+    member_headers = {"Authorization": f"Bearer {member_token}", "X-Workspace-ID": workspace_id}
+    assert client.post("/api/v1/workspace/members", headers=member_headers,
+                       json={"user_id": owner["Authorization"], "role": "admin"}).status_code == 403
+    assert client.patch(f"/api/v1/workspace/members/{member_id}", headers=member_headers,
+                        json={"role": "admin"}).status_code == 403
+    assert client.patch(f"/api/v1/workspace/members/{member_id}", headers=owner,
+                        json={"role": "admin"}).status_code == 200
+    assert client.delete(f"/api/v1/workspace/members/{owner['Authorization']}", headers=owner).status_code == 404
+    assert client.delete(f"/api/v1/workspace/members/{member_id}", headers=owner).status_code == 200
