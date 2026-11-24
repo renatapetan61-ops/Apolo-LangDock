@@ -808,3 +808,24 @@ def test_api_security_headers_and_webhook_delivery_workspace_isolation(monkeypat
     assert created.status_code == 200
     denied = client.get(f"/api/v1/webhooks/{created.json()['id']}/deliveries", headers=other)
     assert denied.status_code == 404
+
+
+def test_deleting_mcp_server_also_removes_oauth_credentials(monkeypatch):
+    from app.main import _db, _now
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "delete-oauth.example.test")
+    owner = workspace_headers()
+    created = client.post("/api/v1/mcp/servers", headers=owner, json={
+        "name":"OAuth cleanup","transport":"streamable-http",
+        "endpoint":"https://delete-oauth.example.test/mcp"
+    })
+    assert created.status_code == 200
+    server_id = created.json()["id"]
+    with _db() as conn:
+        conn.execute("""INSERT INTO mcp_oauth_credentials(server_id,workspace_id,issuer,access_ciphertext,
+            refresh_ciphertext,expires_at,scope,updated_at) VALUES(?,?,?,?,?,?,?,?)""",
+            (server_id,owner["X-Workspace-ID"],"https://issuer.example.test","encrypted-access",
+             "encrypted-refresh",None,None,_now()))
+    deleted = client.delete(f"/api/v1/mcp/servers/{server_id}",headers=owner)
+    assert deleted.status_code == 200
+    with _db() as conn:
+        assert conn.execute("SELECT 1 FROM mcp_oauth_credentials WHERE server_id=?",(server_id,)).fetchone() is None
