@@ -785,6 +785,7 @@ async def list_mcp_servers(request: Request):
 
 @app.post("/api/v1/mcp/servers")
 async def register_mcp_server(payload: dict = Body(...), request: Request = None):
+    _require_workspace_role(request, {'owner', 'admin'})
     name = str(payload.get("name") or "").strip()
     transport = payload.get("transport")
     if not name or len(name) > 100:
@@ -819,6 +820,7 @@ async def register_mcp_server(payload: dict = Body(...), request: Request = None
 
 @app.delete("/api/v1/mcp/servers/{server_id}")
 async def delete_mcp_server(server_id: str, request: Request):
+    _require_workspace_role(request, {'owner', 'admin'})
     with _db() as conn:
         conn.execute("DELETE FROM mcp_tools WHERE workspace_id=? AND server_id=?",
                      (request.state.workspace_id, server_id))
@@ -880,6 +882,7 @@ async def list_mcp_tools(server_id: str, request: Request):
 
 @app.post("/api/v1/mcp/servers/{server_id}/tools/{tool_name}/approval")
 async def set_mcp_tool_approval(server_id: str, tool_name: str, payload: dict = Body(...), request: Request = None):
+    _require_workspace_role(request, {'owner', 'admin'})
     approved = payload.get("approved")
     if not isinstance(approved, bool):
         raise HTTPException(status_code=422, detail="approved must be a boolean.")
@@ -947,6 +950,7 @@ def _mcp_decrypt_secret(ciphertext: str | None) -> str | None:
 
 @app.post("/api/v1/mcp/servers/{server_id}/credentials")
 async def set_mcp_server_credentials(server_id: str, payload: dict = Body(...), request: Request = None):
+    _require_workspace_role(request, {'owner', 'admin'})
     token = payload.get("bearer_token")
     if not isinstance(token, str) or not token.strip() or len(token) > 4096:
         raise HTTPException(status_code=422, detail="A bearer_token up to 4096 characters is required.")
@@ -966,6 +970,7 @@ async def set_mcp_server_credentials(server_id: str, payload: dict = Body(...), 
 
 @app.delete("/api/v1/mcp/servers/{server_id}/credentials")
 async def delete_mcp_server_credentials(server_id: str, request: Request):
+    _require_workspace_role(request, {'owner', 'admin'})
     with _db() as conn:
         result = conn.execute("UPDATE mcp_servers SET auth_ciphertext=NULL,updated_at=? WHERE id=? AND workspace_id=?",
                               (_now(), server_id, request.state.workspace_id))
@@ -1017,6 +1022,7 @@ def _audit(workspace_id: str, actor_user_id: str | None, action: str,
 
 @app.post("/api/v1/api-keys")
 async def create_api_key(payload: dict = Body(default={}), request: Request = None):
+    _require_workspace_role(request, {'owner', 'admin'})
     name = str(payload.get("name") or "").strip()
     if not name or len(name) > 100:
         raise HTTPException(status_code=422, detail="API key name is required (max 100 characters).")
@@ -1051,6 +1057,7 @@ async def list_api_keys(request: Request):
 
 @app.delete("/api/v1/api-keys/{key_id}")
 async def revoke_api_key(key_id: str, request: Request):
+    _require_workspace_role(request, {'owner', 'admin'})
     now = _now()
     with _db() as conn:
         result = conn.execute("UPDATE api_keys SET revoked_at=? WHERE id=? AND workspace_id=? AND revoked_at IS NULL",
@@ -1315,3 +1322,11 @@ async def remove_workspace_member(target_user_id: str, request: Request):
     _audit(request.state.workspace_id, request.state.user_id, "workspace.member.removed",
            "workspace_member", target_user_id)
     return {"user_id": target_user_id, "removed": True}
+
+
+def _require_workspace_role(request: Request, allowed_roles: set[str]):
+    with _db() as conn:
+        row = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                           (request.state.workspace_id, request.state.user_id)).fetchone()
+    if not row or row["role"] not in allowed_roles:
+        raise HTTPException(status_code=403, detail="Insufficient workspace role for this operation.")
