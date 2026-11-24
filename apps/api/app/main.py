@@ -397,3 +397,88 @@ async def chat_stream(request: ChatRequest):
         generator=_google_stream(model,request.messages,request.max_tokens or 1024,request.temperature or 0.7)
     return StreamingResponse(generator,media_type="text/event-stream",
         headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
+
+
+# Identity and workspace foundation. Tokens are opaque, stored only as SHA-256 hashes.
+import hashlib as _hashlib
+import secrets as _secrets
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+_bearer=HTTPBearer(auto_error=False)
+def _password_hash(password:str, salt:bytes|None=None)->str:
+    salt=salt or _secrets.token_bytes(16)
+    digest=_hashlib.pbkdf2_hmac("sha256",password.encode(),salt,310000)
+    return salt.hex()+":"+digest.hex()
+
+def _verify_password(password:str, encoded:str)->bool:
+    try:
+        salt_hex,digest_hex=encoded.split(":",1)
+        return _secrets.compare_digest(_password_hash(password,bytes.fromhex(salt_hex)).split(":",1)[1],digest_hex)
+    except (ValueError,TypeError): return False
+
+def _token_hash(token:str)->str:
+    return _hashlib.sha256(token.encode()).hexdigest()
+
+def _current_user(credentials:HTTPAuthorizationCredentials|None=Depends(_bearer)):
+    if not credentials: raise HTTPException(status_code=401,detail="Authentication required.")
+    with _db() as conn:
+        row=conn.execute("""SELECT u.id,u.email,u.created_at FROM sessions s JOIN users u ON u.id=s.user_id
+        WHERE s.token_hash=? AND s.expires_at>?""",(_token_hash(credentials.credentials),_now())).fetchone()
+    if not row: raise HTTPException(status_code=401,detail="Session invalid or expired.")
+    return dict(row)
+
+with _db() as conn:
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,token_hash TEXT UNIQUE NOT NULL,expires_at TEXT NOT NULL,created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS workspace_members(workspace_id TEXT NOT NULL,user_id TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(workspace_id,user_id));
+    """)
+
+@app.post("/api/v1/auth/register")
+async def register(payload:dict=Body(...)):
+    email=str(payload.get("email") or "").strip().lower()
+    password=payload.get("password")
+    if "@" not in email or len(email)>254: raise HTTPException(status_code=422,detail="A valid email is required.")
+    if not isinstance(password,str) or len(password)<12: raise HTTPException(status_code=422,detail="Password must contain at least 12 characters.")
+    user_id=str(uuid.uuid4()); now=_now()
+    try:
+        with _db() as conn:
+            conn.execute("INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",(user_id,email,_password_hash(password),now))
+    except _sqlite3.IntegrityError: raise HTTPException(status_code=409,detail="Email already registered.")
+    token=_secrets.token_urlsafe(36); expires=(datetime.now(timezone.utc)+__import__("datetime").timedelta(days=7)).isoformat()
+    with _db() as conn: conn.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)",(str(uuid.uuid4()),user_id,_token_hash(token),expires,now))
+    return {"access_token":token,"token_type":"bearer","expires_at":expires,"user":{"id":user_id,"email":email}}
+
+@app.post("/api/v1/auth/login")
+async def login(payload:dict=Body(...)):
+    email=str(payload.get("email") or "").strip().lower(); password=payload.get("password")
+    with _db() as conn: user=conn.execute("SELECT * FROM users WHERE email=?",(email,)).fetchone()
+    if not user or not isinstance(password,str) or not _verify_password(password,user["password_hash"]):
+        raise HTTPException(status_code=401,detail="Invalid email or password.")
+    token=_secrets.token_urlsafe(36); now=_now()
+    expires=(datetime.now(timezone.utc)+__import__("datetime").timedelta(days=7)).isoformat()
+    with _db() as conn: conn.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)",(str(uuid.uuid4()),user["id"],_token_hash(token),expires,now))
+    return {"access_token":token,"token_type":"bearer","expires_at":expires}
+
+@app.get("/api/v1/auth/me")
+async def auth_me(user:dict=Depends(_current_user)):
+    return {"user":user}
+
+@app.post("/api/v1/workspaces")
+async def create_workspace(payload:dict=Body(...),user:dict=Depends(_current_user)):
+    name=str(payload.get("name") or "").strip()
+    if not name or len(name)>120: raise HTTPException(status_code=422,detail="Workspace name is required (max 120 characters).")
+    workspace_id=str(uuid.uuid4()); now=_now()
+    with _db() as conn:
+        conn.execute("INSERT INTO workspaces(id,name,created_at) VALUES(?,?,?)",(workspace_id,name,now))
+        conn.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created_at) VALUES(?,?,?,?)",(workspace_id,user["id"],"owner",now))
+    return {"id":workspace_id,"name":name,"role":"owner","created_at":now}
+
+@app.get("/api/v1/workspaces")
+async def list_workspaces(user:dict=Depends(_current_user)):
+    with _db() as conn:
+        rows=conn.execute("""SELECT w.id,w.name,w.created_at,m.role FROM workspaces w
+        JOIN workspace_members m ON m.workspace_id=w.id WHERE m.user_id=? ORDER BY w.created_at""",(user["id"],)).fetchall()
+    return {"workspaces":[dict(row) for row in rows]}
