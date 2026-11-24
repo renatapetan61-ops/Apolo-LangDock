@@ -12,6 +12,8 @@ permissions:
 jobs:
   api:
     runs-on: ubuntu-latest
+    env:
+      APOLO_DB_PATH: /tmp/apolo-langdock-ci.sqlite3
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
