@@ -57,6 +57,10 @@
 ## Milestone 6 — Production readiness
 - [x] API key scope, expiry, revocation, and per-key rate-limit tests
 - [ ] Automated dependency scanning and independent security review
+- [x] Provider usage metering for upstream-reported prompt/completion/total tokens and latency (non-streaming chat)
+- [x] Workspace monthly request/token quotas with owner/admin configuration and audit events
+- [x] Workspace usage summary and event history API; provider cost remains null unless upstream reports it
+- [ ] Streaming usage metering and API-key-specific usage budgets
 - [ ] Provider usage metering, quotas, and cost guardrails
 - [ ] Deployment guides and observability
 - [ ] Accessibility, localization, and mobile-responsive QA
