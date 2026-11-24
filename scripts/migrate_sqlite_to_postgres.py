@@ -51,11 +51,11 @@ def dependency_order(source: sqlite3.Connection, names: list[str]) -> list[str]:
 
 
 def postgres_ddl(sqlite_ddl: str) -> str:
-    ddl = re.sub(r"\bAUTOINCREMENT\\b", "", sqlite_ddl, flags=re.IGNORECASE)
-    ddl = re.sub(r"\bINTEGER\\b", "BIGINT", ddl, flags=re.IGNORECASE)
-    ddl = re.sub(r"\bREAL\\b", "DOUBLE PRECISION", ddl, flags=re.IGNORECASE)
-    ddl = re.sub(r"\bBLOB\\b", "BYTEA", ddl, flags=re.IGNORECASE)
-    ddl = re.sub(r"\\s+", " ", ddl).strip()
+    ddl = re.sub(r"\bAUTOINCREMENT\b", "", sqlite_ddl, flags=re.IGNORECASE)
+    ddl = re.sub(r"\bINTEGER\b", "BIGINT", ddl, flags=re.IGNORECASE)
+    ddl = re.sub(r"\bREAL\b", "DOUBLE PRECISION", ddl, flags=re.IGNORECASE)
+    ddl = re.sub(r"\bBLOB\b", "BYTEA", ddl, flags=re.IGNORECASE)
+    ddl = re.sub(r"\s+", " ", ddl).strip()
     return ddl
 
 
