@@ -173,6 +173,11 @@ async def chat_completions(request: ChatRequest, http_request: Request):
         usage_data = result.get("usage", {}) if isinstance(result, dict) else {}
     _record_usage(http_request, request.model, provider, usage_data if isinstance(usage_data, dict) else {},
                   result, int((time.monotonic() - usage_started) * 1000), "succeeded")
+    prompt_tokens, completion_tokens, total_tokens, reported_cost = _usage_counts(provider, usage_data if isinstance(usage_data, dict) else {})
+    await _emit_webhook_event(getattr(http_request.state, "workspace_id", ""),
+        "usage.recorded", {"provider": provider, "model": request.model, "prompt_tokens": prompt_tokens,
+                           "completion_tokens": completion_tokens, "total_tokens": total_tokens,
+                           "reported_cost_usd": reported_cost})
     return result
 
 
