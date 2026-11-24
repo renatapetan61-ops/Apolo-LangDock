@@ -230,3 +230,63 @@ def test_workflow_execution_rejects_cycles():
                            json={"input": "Teste"})
     assert response.status_code == 422
     assert "cycle" in response.json()["detail"].lower()
+
+
+def test_mcp_server_registry_discovery_and_approval_gate(monkeypatch):
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "tools.example.test")
+    headers = workspace_headers()
+    other = workspace_headers()
+    server = client.post("/api/v1/mcp/servers", headers=headers, json={
+        "name": "Servidor de teste", "transport": "streamable-http",
+        "endpoint": "https://tools.example.test/mcp"
+    })
+    assert server.status_code == 200
+    server_id = server.json()["id"]
+    assert client.get("/api/v1/mcp/servers", headers=other).json()["servers"] == []
+
+    async def fake_discover(transport, endpoint=None, config_key=None):
+        assert transport == "streamable-http"
+        assert endpoint == "https://tools.example.test/mcp"
+        return [{"name": "read_status", "description": "Read-only status", "input_schema": {"type": "object", "properties": {}}}]
+
+    async def fake_call(transport, tool_name, arguments, endpoint=None, config_key=None):
+        return {"is_error": False, "content": [{"type": "text", "text": "ok"}], "structured_content": None}
+
+    monkeypatch.setattr("app.main._mcp_discover_tools", fake_discover)
+    monkeypatch.setattr("app.main._mcp_invoke_tool", fake_call)
+    discovered = client.post(f"/api/v1/mcp/servers/{server_id}/discover", headers=headers)
+    assert discovered.status_code == 200
+    assert discovered.json()["tools"][0]["approved"] is False
+
+    denied = client.post(f"/api/v1/mcp/servers/{server_id}/tools/read_status/call",
+                         headers=headers, json={"arguments": {}})
+    assert denied.status_code == 403
+
+    approved = client.post(f"/api/v1/mcp/servers/{server_id}/tools/read_status/approval",
+                           headers=headers, json={"approved": True})
+    assert approved.status_code == 200
+    called = client.post(f"/api/v1/mcp/servers/{server_id}/tools/read_status/call",
+                         headers=headers, json={"arguments": {}})
+    assert called.status_code == 200
+    assert called.json()["content"][0]["text"] == "ok"
+    assert client.get(f"/api/v1/mcp/servers/{server_id}/tools", headers=other).status_code == 404
+
+
+def test_mcp_http_endpoint_requires_admin_allowlist(monkeypatch):
+    monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+    headers = workspace_headers()
+    response = client.post("/api/v1/mcp/servers", headers=headers, json={
+        "name": "Not trusted", "transport": "streamable-http",
+        "endpoint": "https://untrusted.example/mcp"
+    })
+    assert response.status_code == 400
+    assert "allowlist" in response.json()["detail"].lower()
+
+
+def test_mcp_stdio_requires_admin_configured_alias(monkeypatch):
+    monkeypatch.setenv("MCP_STDIO_SERVERS_JSON", "{}")
+    headers = workspace_headers()
+    response = client.post("/api/v1/mcp/servers", headers=headers, json={
+        "name": "Unknown stdio", "transport": "stdio", "config_key": "untrusted-command"
+    })
+    assert response.status_code == 400
