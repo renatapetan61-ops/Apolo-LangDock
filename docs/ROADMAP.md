@@ -17,7 +17,7 @@
 - [ ] Free-quota and rate-limit metadata; never label paid models as free
 
 ## Milestone 2 — Identity and workspace
-- [x] Registration/login with PBKDF2 password hashes and opaque expiring bearer sessions\n- [x] Workspace creation and membership listing (owner role)\n- [ ] Enforce workspace scoping across conversations, agents, workflows, and secrets
+- [x] Registration/login with PBKDF2 password hashes and opaque expiring bearer sessions\n- [x] Workspace creation and membership listing (owner role)\n- [x] Enforce workspace scoping across conversations, agents, and workflows (secrets management remains pending)
 - [ ] Roles, permissions, audit log, and secrets management
 - [ ] Database migrations and backups
 
