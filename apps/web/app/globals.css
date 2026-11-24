@@ -107,3 +107,9 @@ h1 { font-size: clamp(30px, 5vw, 48px); margin: 12px 0; }
 .mcp-call textarea{width:100%;padding:11px;border:1px solid var(--border,#30394b);border-radius:9px;background:var(--surface,#101827);color:inherit;font:inherit;font-family:monospace}
 .mcp-call>button{margin-top:12px}.mcp-result{grid-column:1/-1}.mcp-result pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border-radius:9px;background:var(--surface,#101827)}
 @media(max-width:800px){.mcp-layout{grid-template-columns:1fr}.mcp-result{grid-column:auto}.mcp-toolbar{align-items:flex-start;flex-direction:column}}
+
+.mcp-credentials{padding:14px;margin-bottom:20px;border:1px solid var(--border,#30394b);border-radius:10px}
+.mcp-credentials h3{margin-top:0}.mcp-credentials label{display:grid;gap:7px;font-size:13px;font-weight:600}
+.mcp-credentials input{width:100%;padding:10px;border:1px solid var(--border,#30394b);border-radius:8px;background:var(--surface,#101827);color:inherit;font:inherit}
+.mcp-credentials button{padding:9px 11px;margin:10px 8px 0 0;border:0;border-radius:8px;background:var(--accent,#7468f0);color:white;font-weight:700;cursor:pointer}
+.mcp-credentials .secondary-button{border:1px solid var(--border,#30394b);background:transparent;color:inherit}
