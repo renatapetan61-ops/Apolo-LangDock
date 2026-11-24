@@ -523,7 +523,7 @@ async def enforce_identity_and_workspace(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Session invalid or expired."})
         request.state.user_id = row["id"]
         scoped = (path.startswith("/api/v1/conversations") or path.startswith("/api/v1/agents")
-                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/") or path.startswith("/api/v1/api-keys") or path.startswith("/api/v1/audit-logs") or path.startswith("/api/v1/usage/"))
+                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/") or path.startswith("/api/v1/api-keys") or path.startswith("/api/v1/audit-logs") or path.startswith("/api/v1/usage/") or path.startswith("/api/v1/workspace/"))
         if scoped:
             workspace_id = request.headers.get("x-workspace-id", "").strip()
             if not workspace_id:
@@ -1237,3 +1237,81 @@ async def usage_events(request: Request, limit: int = 100):
             cost_usd,latency_ms,status,created_at FROM usage_events WHERE workspace_id=?
             ORDER BY created_at DESC LIMIT ?""", (request.state.workspace_id, limit)).fetchall()
     return {"events": [dict(row) for row in rows]}
+
+
+# Workspace membership administration (RBAC).
+@app.get("/api/v1/workspace/members")
+async def list_workspace_members(request: Request):
+    with _db() as conn:
+        rows = conn.execute("""SELECT u.id AS user_id,u.email,m.role,m.created_at
+            FROM workspace_members m JOIN users u ON u.id=m.user_id
+            WHERE m.workspace_id=? ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,u.email""",
+            (request.state.workspace_id,)).fetchall()
+    return {"members": [dict(row) for row in rows]}
+
+
+@app.post("/api/v1/workspace/members")
+async def add_workspace_member(payload: dict = Body(...), request: Request = None):
+    target_user_id = payload.get("user_id")
+    role = payload.get("role", "member")
+    if not isinstance(target_user_id, str) or not target_user_id or role not in {"admin", "member"}:
+        raise HTTPException(status_code=422, detail="An existing user_id and role admin/member are required.")
+    with _db() as conn:
+        actor = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                             (request.state.workspace_id, request.state.user_id)).fetchone()
+        target = conn.execute("SELECT id FROM users WHERE id=?", (target_user_id,)).fetchone()
+        if not actor or actor["role"] not in {"owner", "admin"}:
+            raise HTTPException(status_code=403, detail="Workspace owner or admin role required.")
+        if actor["role"] == "admin" and role != "member":
+            raise HTTPException(status_code=403, detail="Admins may add members but cannot grant admin role.")
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found.")
+        try:
+            conn.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created_at) VALUES(?,?,?,?)",
+                         (request.state.workspace_id, target_user_id, role, _now()))
+        except _sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="User is already a workspace member.")
+    _audit(request.state.workspace_id, request.state.user_id, "workspace.member.added",
+           "workspace_member", target_user_id, {"role": role})
+    return {"user_id": target_user_id, "role": role, "added": True}
+
+
+@app.patch("/api/v1/workspace/members/{target_user_id}")
+async def change_workspace_member_role(target_user_id: str, payload: dict = Body(...), request: Request = None):
+    role = payload.get("role")
+    if role not in {"admin", "member"}:
+        raise HTTPException(status_code=422, detail="Role must be admin or member.")
+    with _db() as conn:
+        actor = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                             (request.state.workspace_id, request.state.user_id)).fetchone()
+        target = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                              (request.state.workspace_id, target_user_id)).fetchone()
+        if not actor or actor["role"] != "owner":
+            raise HTTPException(status_code=403, detail="Only the workspace owner can change member roles.")
+        if not target or target["role"] == "owner":
+            raise HTTPException(status_code=404, detail="Non-owner workspace member not found.")
+        conn.execute("UPDATE workspace_members SET role=? WHERE workspace_id=? AND user_id=?",
+                     (role, request.state.workspace_id, target_user_id))
+    _audit(request.state.workspace_id, request.state.user_id, "workspace.member.role_changed",
+           "workspace_member", target_user_id, {"role": role})
+    return {"user_id": target_user_id, "role": role, "updated": True}
+
+
+@app.delete("/api/v1/workspace/members/{target_user_id}")
+async def remove_workspace_member(target_user_id: str, request: Request):
+    with _db() as conn:
+        actor = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                             (request.state.workspace_id, request.state.user_id)).fetchone()
+        target = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                              (request.state.workspace_id, target_user_id)).fetchone()
+        if not actor or actor["role"] not in {"owner", "admin"}:
+            raise HTTPException(status_code=403, detail="Workspace owner or admin role required.")
+        if not target or target["role"] == "owner":
+            raise HTTPException(status_code=404, detail="Non-owner workspace member not found.")
+        if actor["role"] == "admin" and target["role"] != "member":
+            raise HTTPException(status_code=403, detail="Admins may remove members but not admins.")
+        conn.execute("DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                     (request.state.workspace_id, target_user_id))
+    _audit(request.state.workspace_id, request.state.user_id, "workspace.member.removed",
+           "workspace_member", target_user_id)
+    return {"user_id": target_user_id, "removed": True}
