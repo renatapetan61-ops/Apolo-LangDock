@@ -442,5 +442,7 @@ def test_workspace_rbac_member_management_and_owner_protection():
                         json={"role": "admin"}).status_code == 403
     assert client.patch(f"/api/v1/workspace/members/{member_id}", headers=owner,
                         json={"role": "admin"}).status_code == 200
+    assert client.patch(f"/api/v1/workspace/members/{member_id}", headers=owner,
+                        json={"role": {"invalid": True}}).status_code == 422
     assert client.delete(f"/api/v1/workspace/members/{owner['Authorization']}", headers=owner).status_code == 404
     assert client.delete(f"/api/v1/workspace/members/{member_id}", headers=owner).status_code == 200
