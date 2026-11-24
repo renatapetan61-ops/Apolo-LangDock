@@ -183,3 +183,50 @@ def test_multi_agent_orchestration_is_bounded(monkeypatch):
     too_many = client.post("/api/v1/agents/orchestrate", headers=headers,
                            json={"agent_ids": agents, "prompt": "Teste", "max_steps": 6})
     assert too_many.status_code == 422
+
+
+def test_workflow_execution_validates_dag_and_runs_model_nodes(monkeypatch):
+    headers = workspace_headers()
+    definition = {
+        "nodes": [
+            {"id": "in", "type": "input", "config": {}},
+            {"id": "prompt", "type": "prompt", "config": {"instructions": "Analise o pedido."}},
+            {"id": "model", "type": "model", "config": {"model": "ollama/test-model"}},
+            {"id": "out", "type": "output", "config": {}},
+        ],
+        "edges": [
+            {"source": "in", "target": "prompt"},
+            {"source": "prompt", "target": "model"},
+            {"source": "model", "target": "out"},
+        ],
+    }
+    saved = client.post("/api/v1/workflows", headers=headers,
+                        json={"name": "Fluxo executável", "definition": definition})
+    assert saved.status_code == 200
+
+    async def fake_chat(request, http_request):
+        assert request.messages[-1].content == "Analise o pedido.\n\nPedido inicial"
+        return {"choices": [{"message": {"content": "Resultado do modelo"}}]}
+
+    monkeypatch.setattr("app.main.chat_completions", fake_chat)
+    run = client.post(f"/api/v1/workflows/{saved.json()['id']}/run", headers=headers,
+                      json={"input": "Pedido inicial"})
+    assert run.status_code == 200
+    assert run.json()["output"] == "Resultado do modelo"
+    history = client.get("/api/v1/workflow-runs", headers=headers)
+    assert history.status_code == 200
+    assert history.json()["runs"][0]["workflow_id"] == saved.json()["id"]
+
+
+def test_workflow_execution_rejects_cycles():
+    headers = workspace_headers()
+    definition = {
+        "nodes": [{"id": "in", "type": "input"}, {"id": "a", "type": "prompt"}],
+        "edges": [{"source": "in", "target": "a"}, {"source": "a", "target": "in"}],
+    }
+    saved = client.post("/api/v1/workflows", headers=headers,
+                        json={"name": "Fluxo cíclico", "definition": definition})
+    response = client.post(f"/api/v1/workflows/{saved.json()['id']}/run", headers=headers,
+                           json={"input": "Teste"})
+    assert response.status_code == 422
+    assert "cycle" in response.json()["detail"].lower()
