@@ -29,15 +29,16 @@
 - [x] Agent registry API with instructions, model selection, and tool metadata
 - [x] Bounded single-agent execution endpoint
 - [x] Multi-agent orchestration (maximum 5 agents/steps) with workspace-scoped run tracing
-- [ ] Agent builder UI
+- [x] Agent builder UI with model selection, prompt configuration, and run console
 - [ ] Tool registry with explicit allowlists and approval gates
 - [ ] Tool-call execution sandbox and timeouts
 - [ ] Streaming agent runs and cancellation
 
 ## Milestone 4 — Workflow automation
 - [x] Workflow definition registry API (JSON nodes/edges storage)
-- [ ] Visual node editor
-- [ ] Safe workflow execution engine with validated node types
+- [x] Visual sequential node editor (input, prompt, model, output)
+- [x] Safe workflow execution engine with DAG validation, cycle rejection, and bounded node/edge counts
+- [x] Workspace-scoped workflow run history
 - [ ] Triggers, schedules, conditions, loops, and retries
 - [ ] Durable execution queue and run history
 - [ ] Webhooks and external integrations
