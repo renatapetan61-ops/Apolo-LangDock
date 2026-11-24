@@ -244,12 +244,12 @@ def test_mcp_server_registry_discovery_and_approval_gate(monkeypatch):
     server_id = server.json()["id"]
     assert client.get("/api/v1/mcp/servers", headers=other).json()["servers"] == []
 
-    async def fake_discover(transport, endpoint=None, config_key=None):
+    async def fake_discover(transport, endpoint=None, config_key=None, bearer_token=None):
         assert transport == "streamable-http"
         assert endpoint == "https://tools.example.test/mcp"
         return [{"name": "read_status", "description": "Read-only status", "input_schema": {"type": "object", "properties": {}}}]
 
-    async def fake_call(transport, tool_name, arguments, endpoint=None, config_key=None):
+    async def fake_call(transport, tool_name, arguments, endpoint=None, config_key=None, bearer_token=None):
         return {"is_error": False, "content": [{"type": "text", "text": "ok"}], "structured_content": None}
 
     monkeypatch.setattr("app.main._mcp_discover_tools", fake_discover)
