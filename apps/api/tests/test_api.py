@@ -740,7 +740,7 @@ def test_additional_openai_compatible_providers_discover_and_chat(monkeypatch):
 def test_sqlite_to_postgres_migration_helpers_preserve_dependency_order():
     import sqlite3
     from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
     from migrate_sqlite_to_postgres import dependency_order, postgres_ddl
     db = sqlite3.connect(":memory:")
     db.executescript("""CREATE TABLE parent(id TEXT PRIMARY KEY);
