@@ -42,6 +42,15 @@ docker compose up --build
 
 The API health endpoint will be available at `http://localhost:8000/health`. The web app will be available at `http://localhost:3000`.
 
+## MCP integration (initial)
+
+- The API uses the official MCP Python SDK for Streamable HTTP and stdio clients.
+- Remote HTTP servers must use HTTPS and an exact hostname in `MCP_ALLOWED_HOSTS`.
+- Stdio processes must be defined by the administrator in `MCP_STDIO_SERVERS_JSON`; workspace users cannot submit commands or arguments.
+- Discovered tools are denied by default. A workspace must explicitly approve each tool before invocation.
+- The separate read-only APOLO MCP server is bound to `127.0.0.1:8765` by Docker Compose. Do not expose it publicly without authentication, TLS, rate limits, and an audit policy.
+- OAuth/bearer credential vaulting and production authorization remain pending.
+
 ## Security
 
 - Keep provider API keys in server-side environment variables or a secrets manager.
