@@ -41,7 +41,9 @@ def stdio_config(config_key: str) -> dict:
     command = entry.get("command")
     args = entry.get("args", [])
     env = entry.get("env", {})
-    if not isinstance(command, str) or not command or not isinstance(args, list) or not all(isinstance(x, str) for x in args):
+    if (not isinstance(command, str) or not command or len(command) > 256
+            or not isinstance(args, list) or len(args) > 32
+            or not all(isinstance(x, str) and len(x) <= 2048 for x in args)):
         raise MCPRuntimeError("The administrator's stdio configuration is invalid.")
     if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         raise MCPRuntimeError("The administrator's stdio environment is invalid.")
@@ -90,9 +92,9 @@ async def invoke_tool(transport: str, tool_name: str, arguments: dict, endpoint:
     async with open_session(transport, endpoint, config_key) as session:
         result = await session.call_tool(tool_name, arguments=arguments)
         content = []
-        for item in result.content:
+        for item in result.content[:32]:
             if hasattr(item, "text"):
-                content.append({"type": "text", "text": item.text[:16000]})
+                content.append({"type": "text", "text": item.text[:8000]})
             elif hasattr(item, "mimeType"):
                 content.append({"type": "binary", "mime_type": item.mimeType})
             else:
