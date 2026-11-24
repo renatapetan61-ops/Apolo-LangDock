@@ -735,3 +735,18 @@ def test_additional_openai_compatible_providers_discover_and_chat(monkeypatch):
         assert found[0]["id"] == provider+"/model-test"
         assert calls[-1][0] == base+"/models"
         assert calls[-1][1]["Authorization"] == "Bearer test-"+provider
+
+
+def test_sqlite_to_postgres_migration_helpers_preserve_dependency_order():
+    import sqlite3
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    from migrate_sqlite_to_postgres import dependency_order, postgres_ddl
+    db = sqlite3.connect(":memory:")
+    db.executescript("""CREATE TABLE parent(id TEXT PRIMARY KEY);
+        CREATE TABLE child(id TEXT PRIMARY KEY,parent_id TEXT REFERENCES parent(id));
+        CREATE INDEX idx_child_parent ON child(parent_id);""")
+    assert dependency_order(db, ["child", "parent"]) == ["parent", "child"]
+    converted = postgres_ddl("CREATE TABLE sample (id INTEGER PRIMARY KEY, amount REAL, payload BLOB)")
+    assert "BIGINT" in converted and "DOUBLE PRECISION" in converted and "BYTEA" in converted
+    assert "\\b" not in converted
