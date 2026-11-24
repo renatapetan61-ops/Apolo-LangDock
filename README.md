@@ -49,7 +49,7 @@ The API health endpoint will be available at `http://localhost:8000/health`. The
 - Stdio processes must be defined by the administrator in `MCP_STDIO_SERVERS_JSON`; workspace users cannot submit commands or arguments.
 - Discovered tools are denied by default. A workspace must explicitly approve each tool before invocation.
 - The separate read-only APOLO MCP server is bound to `127.0.0.1:8765` by Docker Compose. Do not expose it publicly without authentication, TLS, rate limits, and an audit policy.
-- OAuth/bearer credential vaulting and production authorization remain pending.
+- Optional bearer tokens for remote HTTP servers are encrypted at rest with `APOLO_MCP_ENCRYPTION_KEY` (Fernet); rotate or revoke them from the MCP workspace screen. OAuth flows and production authorization remain pending.
 
 ## Security
 
