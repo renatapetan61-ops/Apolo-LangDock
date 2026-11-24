@@ -51,7 +51,7 @@ export default function WorkflowsPage(){
    return [...current.slice(0,outputIndex),node,...current.slice(outputIndex)];
   });
  }
- function removeNode(id:string){setNodes(current=>current.filter(n=>n.id===id||!(n.id===id&&(n.type==="input"||n.type==="output"))));}
+ function removeNode(id:string){setNodes(current=>current.filter(n=>n.id!==id||n.type==="input"||n.type==="output"));}
  function updateNode(id:string,key:string,value:string){setNodes(current=>current.map(n=>n.id===id?{...n,config:{...n.config,[key]:value}}:n));}
  async function save(){
   if(!name.trim())return;setBusy(true);
