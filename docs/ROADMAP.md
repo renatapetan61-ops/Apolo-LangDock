@@ -13,24 +13,31 @@
 - [x] Streaming responses (SSE) for OpenAI-compatible, Anthropic, and Gemini adapters
 - [x] Persistent conversations and message storage (SQLite foundation)
 - [ ] Message branching and provider-native token streaming
-- [ ] Model discovery from provider APIs
+- [x] Live model discovery adapters (provider credentials required)
 - [ ] Free-quota and rate-limit metadata; never label paid models as free
 
 ## Milestone 2 — Identity and workspace
-- [x] Registration/login with PBKDF2 password hashes and opaque expiring bearer sessions\n- [x] Workspace creation and membership listing (owner role)\n- [x] Enforce workspace scoping across conversations, agents, and workflows (secrets management remains pending)
-- [ ] Roles, permissions, audit log, and secrets management
+- [x] Registration/login with PBKDF2 password hashes and opaque expiring bearer sessions
+- [x] Workspace creation and membership listing (owner role)
+- [x] Session logout and revocation endpoint
+- [x] Workspace scoping for conversations, messages, agents, workflows, and agent-run history
+- [x] Login/register and workspace selection in the web UI
+- [ ] Roles, audit log, secrets management, email verification, and rate limiting
 - [ ] Database migrations and backups
 
 ## Milestone 3 — Agents and tools
 - [x] Agent registry API with instructions, model selection, and tool metadata
-- [ ] Agent builder UI and safe execution runtime\n- [ ] Multi-agent orchestration with bounded steps and shared run tracing
+- [x] Bounded single-agent execution endpoint
+- [x] Multi-agent orchestration (maximum 5 agents/steps) with workspace-scoped run tracing
+- [ ] Agent builder UI
 - [ ] Tool registry with explicit allowlists and approval gates
 - [ ] Tool-call execution sandbox and timeouts
-- [ ] Agent run history and tracing
+- [ ] Streaming agent runs and cancellation
 
 ## Milestone 4 — Workflow automation
 - [x] Workflow definition registry API (JSON nodes/edges storage)
 - [ ] Visual node editor
+- [ ] Safe workflow execution engine with validated node types
 - [ ] Triggers, schedules, conditions, loops, and retries
 - [ ] Durable execution queue and run history
 - [ ] Webhooks and external integrations
