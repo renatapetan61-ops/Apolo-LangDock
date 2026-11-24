@@ -6,6 +6,8 @@ services:
       - .env
     ports:
       - "8000:8000"
+    volumes:
+      - apolo_data:/data
     restart: unless-stopped
   web:
     build:
@@ -17,3 +19,6 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
+volumes:
+  apolo_data:
