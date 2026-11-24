@@ -136,3 +136,50 @@ def test_stream_endpoint_requires_provider_credentials(monkeypatch):
         "model": "openai/gpt-test", "messages": [{"role": "user", "content": "hello"}]
     })
     assert response.status_code == 503
+
+
+def test_bounded_agent_execution_and_trace(monkeypatch):
+    headers = workspace_headers()
+    agent = client.post("/api/v1/agents", headers=headers, json={
+        "name": "Agente executor", "instructions": "Resuma com clareza",
+        "model": "ollama/test-model", "tools": []
+    }).json()
+
+    async def fake_chat(request, http_request):
+        return {"choices": [{"message": {"content": "Resultado simulado"}}]}
+
+    monkeypatch.setattr("app.main.chat_completions", fake_chat)
+    run = client.post(f"/api/v1/agents/{agent['id']}/run", headers=headers,
+                      json={"prompt": "Faça um resumo."})
+    assert run.status_code == 200
+    assert run.json()["output"] == "Resultado simulado"
+    assert run.json()["trace"][0]["status"] == "completed"
+    history = client.get("/api/v1/agent-runs", headers=headers)
+    assert history.status_code == 200
+    assert history.json()["runs"][0]["id"] == run.json()["run_id"]
+
+
+def test_multi_agent_orchestration_is_bounded(monkeypatch):
+    headers = workspace_headers()
+    agents = []
+    for name in ("Planejador", "Revisor"):
+        response = client.post("/api/v1/agents", headers=headers, json={
+            "name": name, "instructions": name, "model": "ollama/test-model", "tools": []
+        })
+        assert response.status_code == 200
+        agents.append(response.json()["id"])
+
+    calls = {"count": 0}
+    async def fake_chat(request, http_request):
+        calls["count"] += 1
+        return {"choices": [{"message": {"content": f"Etapa {calls['count']}"}}]}
+
+    monkeypatch.setattr("app.main.chat_completions", fake_chat)
+    result = client.post("/api/v1/agents/orchestrate", headers=headers,
+                         json={"agent_ids": agents, "prompt": "Planeje e revise.", "max_steps": 2})
+    assert result.status_code == 200
+    assert calls["count"] == 2
+    assert result.json()["trace"][-1]["status"] == "completed"
+    too_many = client.post("/api/v1/agents/orchestrate", headers=headers,
+                           json={"agent_ids": agents, "prompt": "Teste", "max_steps": 6})
+    assert too_many.status_code == 422
