@@ -772,7 +772,7 @@ async def list_mcp_servers(request: Request):
     with _db() as conn:
         rows = conn.execute("SELECT * FROM mcp_servers WHERE workspace_id=? ORDER BY created_at DESC",
                             (request.state.workspace_id,)).fetchall()
-    return {"servers": [dict(row) for row in rows]}
+    return {"servers": [{key: row[key] for key in ("id","workspace_id","name","transport","endpoint","config_key","created_at","updated_at")} for row in rows]}
 
 
 @app.post("/api/v1/mcp/servers")
@@ -831,7 +831,9 @@ async def discover_mcp_server_tools(server_id: str, request: Request):
         found = await asyncio.wait_for(
             _mcp_discover_tools(server["transport"], server["endpoint"], server["config_key"], _mcp_decrypt_secret(server["auth_ciphertext"])), timeout=25
         )
-    except (MCPRuntimeError, Exception) as exc:
+    except HTTPException:
+        raise
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"MCP discovery failed: {str(exc)[:300]}") from exc
     now = _now()
     with _db() as conn:
@@ -900,6 +902,8 @@ async def call_approved_mcp_tool(server_id: str, tool_name: str, payload: dict =
         )
     except asyncio.TimeoutError as exc:
         raise HTTPException(status_code=504, detail="MCP tool execution timed out.") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"MCP tool execution failed: {str(exc)[:300]}") from exc
     return result
