@@ -1215,15 +1215,13 @@ def _check_workspace_quota(request: Request):
     with _db() as conn:
         limits = conn.execute("SELECT * FROM workspace_usage_limits WHERE workspace_id=?", (workspace_id,)).fetchone()
         key_limits = conn.execute("SELECT * FROM api_key_usage_limits WHERE key_id=?", (api_key_id,)).fetchone() if api_key_id else None
-        if not limits:
-            return
         since = _month_start()
         row = conn.execute("""SELECT COUNT(*) AS requests, COALESCE(SUM(total_tokens),0) AS tokens
             FROM usage_events WHERE workspace_id=? AND created_at>=? AND status='succeeded'""",
             (workspace_id, since)).fetchone()
-    if limits["monthly_request_limit"] is not None and row["requests"] >= limits["monthly_request_limit"]:
+    if limits and limits["monthly_request_limit"] is not None and row["requests"] >= limits["monthly_request_limit"]:
         raise HTTPException(status_code=429, detail="Workspace monthly request quota reached.")
-    if limits["monthly_token_limit"] is not None and row["tokens"] >= limits["monthly_token_limit"]:
+    if limits and limits["monthly_token_limit"] is not None and row["tokens"] >= limits["monthly_token_limit"]:
         raise HTTPException(status_code=429, detail="Workspace monthly token quota reached.")
     if key_limits:
         with _db() as conn:
