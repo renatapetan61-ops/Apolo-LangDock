@@ -44,7 +44,8 @@
 - [x] Workspace-scoped workflow run history
 - [ ] Triggers, schedules, conditions, loops, and retries
 - [ ] Durable execution queue and run history
-- [ ] Webhooks and external integrations
+- [x] Workspace webhook endpoint registry, encrypted signing secrets, HTTPS host allowlist, signed test delivery, and delivery history foundation
+- [ ] Event-driven delivery queue, retries/backoff, and external integrations
 
 ## Milestone 5 — MCP
 - [x] MCP client with Streamable HTTP and administrator-allowlisted stdio transports
@@ -63,7 +64,8 @@
 - [x] Provider usage metering for upstream-reported prompt/completion/total tokens and latency (non-streaming chat)
 - [x] Workspace monthly request/token quotas with owner/admin configuration and audit events
 - [x] Workspace usage summary and event history API; provider cost remains null unless upstream reports it
-- [ ] Streaming usage metering and API-key-specific usage budgets
+- [x] API-key-specific monthly token/request quotas and usage summary endpoint
+- [ ] Streaming usage metering and durable API-key usage accounting
 - [ ] Provider usage metering, quotas, and cost guardrails
 - [ ] Deployment guides and observability
 - [ ] Accessibility, localization, and mobile-responsive QA
