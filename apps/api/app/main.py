@@ -1004,10 +1004,12 @@ async def create_api_key(payload: dict = Body(default={}), request: Request = No
         raise HTTPException(status_code=422, detail="API key name is required (max 100 characters).")
     scopes = payload.get("scopes", ["chat:completions", "models:read"])
     allowed_scopes = {"chat:completions", "models:read"}
-    if not isinstance(scopes, list) or not scopes or len(scopes) > 2 or len(set(scopes)) != len(scopes) or any(scope not in allowed_scopes for scope in scopes):
+    if (not isinstance(scopes, list) or not scopes or len(scopes) > 2
+            or not all(isinstance(scope, str) for scope in scopes)
+            or len(set(scopes)) != len(scopes) or any(scope not in allowed_scopes for scope in scopes)):
         raise HTTPException(status_code=422, detail="Scopes must be selected from chat:completions and models:read.")
     expires_in_days = payload.get("expires_in_days", 90)
-    if not isinstance(expires_in_days, int) or not 1 <= expires_in_days <= 365:
+    if isinstance(expires_in_days, bool) or not isinstance(expires_in_days, int) or not 1 <= expires_in_days <= 365:
         raise HTTPException(status_code=422, detail="expires_in_days must be between 1 and 365.")
     raw = "apolo_sk_" + _secrets.token_urlsafe(32)
     key_id, now = str(uuid.uuid4()), _now()
