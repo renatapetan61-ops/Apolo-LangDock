@@ -5,3 +5,5 @@ httpx>=0.27,<1
 pytest>=9.0.3,<10
 mcp>=1.28,<2
 cryptography>=48.0.1,<51
+
+psycopg[binary]>=3.2,<4
