@@ -513,6 +513,8 @@ with _db() as conn:
     CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,token_hash TEXT UNIQUE NOT NULL,expires_at TEXT NOT NULL,created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY,name TEXT NOT NULL,created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS workspace_members(workspace_id TEXT NOT NULL,user_id TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(workspace_id,user_id));
+    CREATE TABLE IF NOT EXISTS auth_login_attempts(id TEXT PRIMARY KEY,key_hash TEXT NOT NULL,created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_key_created ON auth_login_attempts(key_hash,created_at);
     """)
 
 @app.post("/api/v1/auth/register")
@@ -530,9 +532,31 @@ async def register(payload:dict=Body(...)):
     with _db() as conn: conn.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)",(str(uuid.uuid4()),user_id,_token_hash(token),expires,now))
     return {"access_token":token,"token_type":"bearer","expires_at":expires,"user":{"id":user_id,"email":email}}
 
+def _enforce_login_rate_limit(request: Request, email: str):
+    ip = request.client.host if request.client else "unknown"
+    now = datetime.now(timezone.utc)
+    window_start = (now - __import__("datetime").timedelta(minutes=15)).isoformat()
+    keys = [("ip", _token_hash("login-ip:" + ip), 60),
+            ("identity", _token_hash("login-identity:" + email + ":" + ip),
+             max(1, min(int(os.getenv("APOLO_AUTH_LOGIN_RPM", "10")), 60)))]
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM auth_login_attempts WHERE created_at<?",
+                     ((now - __import__("datetime").timedelta(days=2)).isoformat(),))
+        for label, key_hash, limit in keys:
+            count = conn.execute("SELECT COUNT(*) FROM auth_login_attempts WHERE key_hash=? AND created_at>=?",
+                                 (key_hash, window_start)).fetchone()[0]
+            if count >= limit:
+                raise HTTPException(status_code=429, detail="Too many login attempts. Wait 15 minutes and try again.")
+        for _, key_hash, _ in keys:
+            conn.execute("INSERT INTO auth_login_attempts(id,key_hash,created_at) VALUES(?,?,?)",
+                         (str(uuid.uuid4()), key_hash, _now()))
+
+
 @app.post("/api/v1/auth/login")
-async def login(payload:dict=Body(...)):
+async def login(payload:dict=Body(...), request: Request = None):
     email=str(payload.get("email") or "").strip().lower(); password=payload.get("password")
+    _enforce_login_rate_limit(request, email)
     with _db() as conn: user=conn.execute("SELECT * FROM users WHERE email=?",(email,)).fetchone()
     if not user or not isinstance(password,str) or not _verify_password(password,user["password_hash"]):
         raise HTTPException(status_code=401,detail="Invalid email or password.")
