@@ -539,3 +539,58 @@ def test_webhook_signed_test_delivery(monkeypatch):
     assert result.status_code == 200 and result.json()["delivered"] is True
     deliveries = client.get(f"/api/v1/webhooks/{created.json()['id']}/deliveries", headers=owner)
     assert deliveries.json()["deliveries"][0]["status_code"] == 204
+
+
+def test_mcp_oauth_pkce_start_callback_and_replay(monkeypatch):
+    from cryptography.fernet import Fernet
+    from urllib.parse import urlparse, parse_qs
+    from app.main import _db
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "oauth-mcp.example.test")
+    monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("APOLO_MCP_OAUTH_CLIENT_ID", "apolo-public-client")
+    monkeypatch.setenv("APOLO_MCP_OAUTH_REDIRECT_URI", "https://app.example.test/api/v1/mcp/oauth/callback")
+    headers = workspace_headers()
+    server = client.post("/api/v1/mcp/servers", headers=headers, json={
+        "name": "OAuth MCP", "transport": "streamable-http",
+        "endpoint": "https://oauth-mcp.example.test/mcp"
+    })
+    assert server.status_code == 200
+    async def fake_discover(resource):
+        return ({"resource": resource, "authorization_servers": ["https://issuer.example.test"],
+                 "scopes_supported": ["tools:read"]},
+                {"issuer": "https://issuer.example.test",
+                 "authorization_endpoint": "https://issuer.example.test/authorize",
+                 "token_endpoint": "https://issuer.example.test/token",
+                 "code_challenge_methods_supported": ["S256"],
+                 "token_endpoint_auth_methods_supported": ["none"]})
+    monkeypatch.setattr("app.main._mcp_oauth_discover", fake_discover)
+    started = client.post(f"/api/v1/mcp/servers/{server.json()['id']}/oauth/start", headers=headers)
+    assert started.status_code == 200
+    params = parse_qs(urlparse(started.json()["authorization_url"]).query)
+    assert params["code_challenge_method"] == ["S256"]
+    assert params["resource"] == ["https://oauth-mcp.example.test/mcp"]
+    state = params["state"][0]
+
+    class TokenResponse:
+        status_code = 200
+        def json(self):
+            return {"access_token": "access-token-test", "refresh_token": "refresh-token-test", "expires_in": 3600}
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def post(self, url, data, headers):
+            assert url == "https://issuer.example.test/token"
+            assert data["grant_type"] == "authorization_code"
+            assert data["code_verifier"]
+            assert data["resource"] == "https://oauth-mcp.example.test/mcp"
+            return TokenResponse()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeAsyncClient)
+    callback = client.get("/api/v1/mcp/oauth/callback", params={"code": "one-time-code", "state": state})
+    assert callback.status_code == 200 and callback.json()["connected"] is True
+    with _db() as conn:
+        cred = conn.execute("SELECT * FROM mcp_oauth_credentials WHERE server_id=?",
+                            (server.json()["id"],)).fetchone()
+    assert cred and cred["access_ciphertext"] != "access-token-test"
+    replay = client.get("/api/v1/mcp/oauth/callback", params={"code": "one-time-code", "state": state})
+    assert replay.status_code == 400
