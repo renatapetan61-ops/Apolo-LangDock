@@ -726,6 +726,8 @@ def test_additional_openai_compatible_providers_discover_and_chat(monkeypatch):
         monkeypatch.setenv(provider.upper()+"_API_KEY", "test-"+provider)
         assert _key(provider) == "test-"+provider
         assert _compatible_base(provider) == base
+        monkeypatch.setenv(provider.upper()+"_BASE_URL", "")
+        assert _compatible_base(provider) == base
     calls = []
     async def fake_get_json(url, headers=None, params=None):
         calls.append((url, headers))
