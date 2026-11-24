@@ -511,7 +511,7 @@ from fastapi.responses import JSONResponse
 @app.middleware("http")
 async def enforce_identity_and_workspace(request: Request, call_next):
     path = request.url.path
-    public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models", "/api/v1/public/models", "/api/v1/public/chat/completions"}
+    public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models", "/api/v1/public/models", "/api/v1/public/chat/completions", "/api/v1/mcp/oauth/callback"}
     if path.startswith("/api/v1/") and not public and request.method != "OPTIONS":
         auth = request.headers.get("authorization", "")
         if not auth.lower().startswith("bearer "):
@@ -1004,6 +1004,17 @@ with _db() as conn:
       payload TEXT NOT NULL, status_code INTEGER, response_excerpt TEXT, attempts INTEGER NOT NULL DEFAULT 0,
       next_attempt_at TEXT, delivered_at TEXT, created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS mcp_oauth_transactions(
+      id TEXT PRIMARY KEY, state_hash TEXT UNIQUE NOT NULL, workspace_id TEXT NOT NULL, server_id TEXT NOT NULL,
+      issuer TEXT NOT NULL, token_endpoint TEXT NOT NULL, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL,
+      resource TEXT NOT NULL, scope TEXT, verifier_ciphertext TEXT NOT NULL, issuer_response_required INTEGER NOT NULL,
+      expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mcp_oauth_credentials(
+      server_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, issuer TEXT NOT NULL,
+      access_ciphertext TEXT NOT NULL, refresh_ciphertext TEXT, expires_at TEXT, scope TEXT,
+      updated_at TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_endpoint ON webhook_deliveries(webhook_id,created_at);
     CREATE TABLE IF NOT EXISTS audit_logs(
       id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, actor_user_id TEXT,
@@ -1030,6 +1041,9 @@ with _db() as conn:
         conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_token_limit INTEGER")
     if "monthly_request_limit" not in api_key_columns:
         conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_request_limit INTEGER")
+    mcp_columns = {row[1] for row in conn.execute("PRAGMA table_info(mcp_servers)").fetchall()}
+    if "auth_mode" not in mcp_columns:
+        conn.execute("ALTER TABLE mcp_servers ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'bearer'")
 
 
 def _audit(workspace_id: str, actor_user_id: str | None, action: str,
@@ -1527,3 +1541,172 @@ async def list_webhook_deliveries(webhook_id: str, request: Request, limit: int 
             delivered_at,created_at FROM webhook_deliveries WHERE webhook_id=? AND workspace_id=?
             ORDER BY created_at DESC LIMIT ?""", (webhook_id, request.state.workspace_id, limit)).fetchall()
     return {"deliveries": [dict(row) for row in rows]}
+
+
+# MCP OAuth authorization-code client (public client with mandatory PKCE S256).
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
+
+
+def _oauth_https_url(value: str, label: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise HTTPException(status_code=502, detail=f"OAuth {label} must be an HTTPS URL without embedded credentials or fragments.")
+    return value
+
+
+def _oauth_metadata_url(issuer: str, well_known: str) -> str:
+    parsed = urlparse(issuer.rstrip("/"))
+    path = parsed.path
+    if path:
+        return urlunparse((parsed.scheme, parsed.netloc, f"/.well-known/{well_known}{path}", "", "", ""))
+    return f"{issuer.rstrip('/')}/.well-known/{well_known}"
+
+
+async def _mcp_oauth_discover(resource: str) -> tuple[dict, dict]:
+    parsed = urlparse(resource)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    candidates = [f"{root}/.well-known/oauth-protected-resource{parsed.path}",
+                  f"{root}/.well-known/oauth-protected-resource"]
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        protected = None
+        for candidate in dict.fromkeys(candidates):
+            response = await client.get(candidate)
+            if response.status_code == 200:
+                protected = response.json()
+                break
+        if not isinstance(protected, dict) or protected.get("resource") != resource:
+            raise HTTPException(status_code=400, detail="MCP Protected Resource Metadata is missing or its resource identifier does not exactly match the configured MCP endpoint.")
+        issuers = protected.get("authorization_servers")
+        if not isinstance(issuers, list) or not issuers or not isinstance(issuers[0], str):
+            raise HTTPException(status_code=400, detail="Protected Resource Metadata did not advertise an authorization server.")
+        issuer = _oauth_https_url(issuers[0], "issuer").rstrip("/")
+        metadata = None
+        for well_known in ("oauth-authorization-server", "openid-configuration"):
+            response = await client.get(_oauth_metadata_url(issuer, well_known))
+            if response.status_code == 200:
+                candidate = response.json()
+                if isinstance(candidate, dict) and candidate.get("issuer") == issuer:
+                    metadata = candidate
+                    break
+        if not isinstance(metadata, dict):
+            raise HTTPException(status_code=400, detail="Could not validate OAuth authorization-server metadata issuer.")
+        if "S256" not in (metadata.get("code_challenge_methods_supported") or []):
+            raise HTTPException(status_code=400, detail="Authorization server does not explicitly advertise PKCE S256; OAuth connection refused.")
+        if "none" not in (metadata.get("token_endpoint_auth_methods_supported") or []):
+            raise HTTPException(status_code=400, detail="Authorization server must support public-client token authentication method 'none'.")
+        _oauth_https_url(metadata.get("authorization_endpoint", ""), "authorization endpoint")
+        _oauth_https_url(metadata.get("token_endpoint", ""), "token endpoint")
+        return protected, metadata
+
+
+@app.post("/api/v1/mcp/servers/{server_id}/oauth/start")
+async def start_mcp_oauth(server_id: str, request: Request):
+    _require_workspace_role(request, {"owner", "admin"})
+    client_id = os.getenv("APOLO_MCP_OAUTH_CLIENT_ID", "").strip()
+    redirect_uri = os.getenv("APOLO_MCP_OAUTH_REDIRECT_URI", "").strip()
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=503, detail="Configure APOLO_MCP_OAUTH_CLIENT_ID and APOLO_MCP_OAUTH_REDIRECT_URI for a pre-registered public OAuth client.")
+    _oauth_https_url(redirect_uri, "redirect URI")
+    with _db() as conn:
+        server = conn.execute("SELECT * FROM mcp_servers WHERE id=? AND workspace_id=?",
+                              (server_id, request.state.workspace_id)).fetchone()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP server not found.")
+    if server["transport"] != "streamable-http":
+        raise HTTPException(status_code=400, detail="OAuth authorization applies only to Streamable HTTP MCP servers.")
+    protected, metadata = await _mcp_oauth_discover(server["endpoint"])
+    verifier = _secrets.token_urlsafe(64)
+    challenge = _b64url(_hashlib.sha256(verifier.encode()).digest())
+    state = _secrets.token_urlsafe(32)
+    scope_values = protected.get("scopes_supported", [])
+    scope = " ".join(x for x in scope_values if isinstance(x, str)) if isinstance(scope_values, list) else ""
+    params = {"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri,
+              "state": state, "code_challenge": challenge, "code_challenge_method": "S256",
+              "resource": server["endpoint"]}
+    if scope:
+        params["scope"] = scope
+    auth_url = metadata["authorization_endpoint"] + ("&" if "?" in metadata["authorization_endpoint"] else "?") + urlencode(params)
+    transaction_id, now = str(uuid.uuid4()), datetime.now(timezone.utc)
+    expires = (now + __import__("datetime").timedelta(minutes=10)).isoformat()
+    with _db() as conn:
+        conn.execute("""INSERT INTO mcp_oauth_transactions(id,state_hash,workspace_id,server_id,issuer,token_endpoint,
+            client_id,redirect_uri,resource,scope,verifier_ciphertext,issuer_response_required,expires_at,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (transaction_id, _token_hash(state), request.state.workspace_id, server_id, metadata["issuer"],
+             metadata["token_endpoint"], client_id, redirect_uri, server["endpoint"], scope or None,
+             _mcp_encrypt_secret(verifier), 1 if metadata.get("authorization_response_iss_parameter_supported") else 0,
+             expires, now.isoformat()))
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.oauth.started", "mcp_server", server_id)
+    return {"authorization_url": auth_url, "expires_at": expires, "transaction_id": transaction_id}
+
+
+def _b64url(value: bytes) -> str:
+    return __import__("base64").urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+@app.get("/api/v1/mcp/oauth/callback")
+async def mcp_oauth_callback(code: str | None = None, state: str | None = None,
+                             iss: str | None = None, error: str | None = None):
+    if not state:
+        raise HTTPException(status_code=400, detail="OAuth state is required.")
+    with _db() as conn:
+        tx = conn.execute("SELECT * FROM mcp_oauth_transactions WHERE state_hash=? AND consumed_at IS NULL",
+                          (_token_hash(state),)).fetchone()
+    if not tx or tx["expires_at"] <= _now():
+        raise HTTPException(status_code=400, detail="OAuth transaction is invalid, expired, or already consumed.")
+    if error:
+        with _db() as conn:
+            conn.execute("UPDATE mcp_oauth_transactions SET consumed_at=? WHERE id=?", (_now(), tx["id"]))
+        raise HTTPException(status_code=400, detail="OAuth authorization was denied by the authorization server.")
+    if tx["issuer_response_required"] and iss != tx["issuer"]:
+        raise HTTPException(status_code=400, detail="OAuth authorization response issuer does not match the discovered issuer.")
+    if not code or len(code) > 4096:
+        raise HTTPException(status_code=400, detail="A valid OAuth authorization code is required.")
+    verifier = _mcp_decrypt_secret(tx["verifier_ciphertext"])
+    form = {"grant_type": "authorization_code", "code": code, "redirect_uri": tx["redirect_uri"],
+            "client_id": tx["client_id"], "code_verifier": verifier, "resource": tx["resource"]}
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+        response = await client.post(tx["token_endpoint"], data=form,
+                                     headers={"Accept": "application/json"})
+    if response.status_code != 200:
+        with _db() as conn:
+            conn.execute("UPDATE mcp_oauth_transactions SET consumed_at=? WHERE id=?", (_now(), tx["id"]))
+        raise HTTPException(status_code=502, detail="OAuth token exchange failed; authorization transaction consumed.")
+    token_data = response.json()
+    access = token_data.get("access_token")
+    if not isinstance(access, str) or not access or len(access) > 16384:
+        raise HTTPException(status_code=502, detail="OAuth token response did not contain a valid access token.")
+    refresh = token_data.get("refresh_token")
+    if refresh is not None and (not isinstance(refresh, str) or len(refresh) > 16384):
+        raise HTTPException(status_code=502, detail="OAuth refresh token response was invalid.")
+    expires_in = token_data.get("expires_in")
+    expiry = None
+    if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0:
+        expiry = (datetime.now(timezone.utc) + __import__("datetime").timedelta(seconds=min(int(expires_in), 31536000))).isoformat()
+    with _db() as conn:
+        conn.execute("""INSERT INTO mcp_oauth_credentials(server_id,workspace_id,issuer,access_ciphertext,refresh_ciphertext,
+            expires_at,scope,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET
+            workspace_id=excluded.workspace_id,issuer=excluded.issuer,access_ciphertext=excluded.access_ciphertext,
+            refresh_ciphertext=excluded.refresh_ciphertext,expires_at=excluded.expires_at,scope=excluded.scope,
+            updated_at=excluded.updated_at""",
+            (tx["server_id"], tx["workspace_id"], tx["issuer"], _mcp_encrypt_secret(access),
+             _mcp_encrypt_secret(refresh) if refresh else None, expiry, token_data.get("scope"), _now()))
+        conn.execute("UPDATE mcp_oauth_transactions SET consumed_at=? WHERE id=?", (_now(), tx["id"]))
+    _audit(tx["workspace_id"], None, "mcp.oauth.connected", "mcp_server", tx["server_id"],
+           {"issuer": tx["issuer"], "expires_at": expiry})
+    return {"connected": True, "server_id": tx["server_id"], "expires_at": expiry,
+            "refresh_token_received": bool(refresh)}
+
+
+@app.delete("/api/v1/mcp/servers/{server_id}/oauth")
+async def revoke_mcp_oauth(server_id: str, request: Request):
+    _require_workspace_role(request, {"owner", "admin"})
+    with _db() as conn:
+        result = conn.execute("DELETE FROM mcp_oauth_credentials WHERE server_id=? AND workspace_id=?",
+                              (server_id, request.state.workspace_id))
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="OAuth credentials not found.")
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.oauth.revoked", "mcp_server", server_id)
+    return {"revoked": True, "server_id": server_id}
+
+
