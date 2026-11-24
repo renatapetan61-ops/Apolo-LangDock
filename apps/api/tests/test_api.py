@@ -787,3 +787,22 @@ def test_login_rate_limit_is_persistent_and_scoped_by_ip_and_identity(monkeypatc
     assert first.status_code == 200
     second = client.post("/api/v1/auth/login", json={"email":email,"password":password})
     assert second.status_code == 429
+
+
+def test_api_security_headers_and_webhook_delivery_workspace_isolation(monkeypatch):
+    from cryptography.fernet import Fernet
+    owner = workspace_headers()
+    other = workspace_headers()
+    health = client.get("/health")
+    assert health.headers["x-content-type-options"] == "nosniff"
+    assert health.headers["x-frame-options"] == "DENY"
+    assert health.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+    monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("WEBHOOK_ALLOWED_HOSTS", "hooks.example.test")
+    created = client.post("/api/v1/webhooks", headers=owner, json={
+        "name":"Private hook","url":"https://hooks.example.test/events",
+        "secret":"a-long-webhook-signing-secret-123","events":["test.ping"]
+    })
+    assert created.status_code == 200
+    denied = client.get(f"/api/v1/webhooks/{created.json()['id']}/deliveries", headers=other)
+    assert denied.status_code == 404
