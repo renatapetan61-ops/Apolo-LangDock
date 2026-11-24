@@ -313,6 +313,13 @@ def test_mcp_bearer_credentials_are_encrypted_and_hidden(monkeypatch):
     assert row["auth_ciphertext"] != raw_token
     assert __import__("app.main", fromlist=["_mcp_decrypt_secret"])._mcp_decrypt_secret(row["auth_ciphertext"]) == raw_token
 
+    async def fake_discover(transport, endpoint=None, config_key=None, bearer_token=None):
+        assert bearer_token == raw_token
+        return []
+    monkeypatch.setattr("app.main._mcp_discover_tools", fake_discover)
+    discovered = client.post(f"/api/v1/mcp/servers/{server_id}/discover", headers=headers)
+    assert discovered.status_code == 200
+
     rotated = client.post(f"/api/v1/mcp/servers/{server_id}/credentials", headers=headers,
                           json={"bearer_token": "rotated-secret"})
     assert rotated.status_code == 200
