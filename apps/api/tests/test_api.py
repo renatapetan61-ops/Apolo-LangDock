@@ -386,3 +386,34 @@ def test_api_key_scopes_and_rate_limit(monkeypatch):
     assert client.get("/api/v1/public/models", headers=key_headers).status_code == 200
     limited = client.get("/api/v1/public/models", headers=key_headers)
     assert limited.status_code == 429
+
+
+def test_workspace_usage_metering_and_monthly_quotas(monkeypatch):
+    headers = workspace_headers()
+    from app.main import _record_usage, _usage_counts
+    assert _usage_counts("anthropic", {"input_tokens": 12, "output_tokens": 8})[:3] == (12, 8, 20)
+    assert _usage_counts("google", {"promptTokenCount": 5, "candidatesTokenCount": 7})[:3] == (5, 7, 12)
+    created = client.put("/api/v1/usage/limits", headers=headers,
+                         json={"monthly_token_limit": 100, "monthly_request_limit": 3})
+    assert created.status_code == 200
+    with __import__("app.main", fromlist=["_db"])._db() as conn:
+        conn.execute("""INSERT INTO usage_events(id,workspace_id,provider,model,prompt_tokens,completion_tokens,
+            total_tokens,latency_ms,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), headers["X-Workspace-ID"], "openai", "gpt-test", 40, 60, 100, 25,
+             "succeeded", __import__("app.main", fromlist=["_now"])._now()))
+    limited = client.post("/api/v1/chat/completions", headers=headers, json={
+        "model": "ollama/test", "messages": [{"role": "user", "content": "hello"}]
+    })
+    assert limited.status_code == 429
+    summary = client.get("/api/v1/usage/summary", headers=headers)
+    assert summary.status_code == 200
+    assert summary.json()["totals"]["tokens"] == 100
+    assert summary.json()["totals"]["reported_cost_usd"] is None
+
+
+def test_usage_quota_limits_validation_and_workspace_isolation():
+    headers = workspace_headers()
+    other = workspace_headers()
+    assert client.put("/api/v1/usage/limits", headers=headers,
+                      json={"monthly_token_limit": 0}).status_code == 422
+    assert client.get("/api/v1/usage/summary", headers=other).json()["totals"]["tokens"] == 0
