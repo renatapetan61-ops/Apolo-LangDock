@@ -1,4 +1,5 @@
 import sys
+import pytest
 import uuid
 from pathlib import Path
 
@@ -750,3 +751,28 @@ def test_sqlite_to_postgres_migration_helpers_preserve_dependency_order():
     converted = postgres_ddl("CREATE TABLE sample (id INTEGER PRIMARY KEY, amount REAL, payload BLOB)")
     assert "BIGINT" in converted and "DOUBLE PRECISION" in converted and "BYTEA" in converted
     assert "\\b" not in converted
+
+
+def test_database_backup_restore_checks_integrity_and_encryption(tmp_path, monkeypatch):
+    import sqlite3
+    from cryptography.fernet import Fernet
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+    from backup_database import create_backup, restore_backup
+    source = tmp_path / "source.sqlite3"
+    conn = sqlite3.connect(source)
+    conn.execute("CREATE TABLE sample(id TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO sample VALUES('one','persisted')")
+    conn.commit()
+    conn.close()
+    key = Fernet.generate_key().decode()
+    archive = tmp_path / "backup.enc"
+    created = create_backup(source, archive, key)
+    assert created["encrypted"] is True
+    restored = tmp_path / "restored.sqlite3"
+    result = restore_backup(archive, restored, key, False)
+    assert result["integrity_check"] == "ok"
+    check = sqlite3.connect(restored)
+    assert check.execute("SELECT value FROM sample WHERE id='one'").fetchone()[0] == "persisted"
+    check.close()
+    with pytest.raises(FileExistsError):
+        restore_backup(archive, restored, key, False)
