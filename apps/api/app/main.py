@@ -527,3 +527,11 @@ async def enforce_identity_and_workspace(request: Request, call_next):
                 return JSONResponse(status_code=403, content={"detail": "Workspace access denied."})
             request.state.workspace_id = workspace_id
     return await call_next(request)
+
+
+@app.post("/api/v1/auth/logout")
+async def logout(user: dict = Depends(_current_user), credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)):
+    if credentials:
+        with _db() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(credentials.credentials),))
+    return {"logged_out": True}
