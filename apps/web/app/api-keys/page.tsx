@@ -62,7 +62,10 @@ export default function APIKeysPage(){
     <button disabled={busy||!name.trim()||(!readScope&&!chatScope)} onClick={createKey}>Criar chave</button>
    </div>
    {createdKey&&<div className="new-api-key"><strong>Copie sua chave agora</strong><code>{createdKey}</code><button onClick={()=>navigator.clipboard.writeText(createdKey)}>Copiar chave</button><p className="note">Por segurança, a chave completa não será mostrada novamente. Guarde-a em um gerenciador de segredos.</p></div>}
-   <h2>Uso da API</h2><pre className="api-example">curl https://SEU_HOST/api/v1/public/chat/completions \\n  -H "X-API-Key: apolo_sk_SUA_CHAVE" \\n  -H "Content-Type: application/json" \\n  -d '{"model":"ollama/llama3.2","messages":[{"role":"user","content":"Olá"}]}'</pre>
+   <h2>Uso da API</h2><pre className="api-example">curl https://SEU_HOST/api/v1/public/chat/completions \\
+  -H "X-API-Key: apolo_sk_SUA_CHAVE" \\
+  -H "Content-Type: application/json" \\
+  -d &apos;&#123;&quot;model&quot;:&quot;ollama/llama3.2&quot;,&quot;messages&quot;:[&#123;&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;Olá&quot;&#125;]&#125;&apos;</pre>
    <p className="note">Limite inicial: 60 chamadas por minuto por chave (configurável no servidor por APOLO_API_KEY_RPM, máximo 600). Custos e limites de inferência continuam pertencendo ao provedor do modelo.</p>
    </section>
    <section className="card api-key-card"><h2>Chaves deste workspace</h2><div className="api-key-list">{keys.map(k=><article key={k.id}><div><strong>{k.name}</strong><code>{k.key_prefix}••••••••</code><small>Escopos: {k.scopes.join(", ")}</small><small>Expira: {k.expires_at?new Date(k.expires_at).toLocaleString():"sem expiração"}</small><small>Último uso: {k.last_used_at?new Date(k.last_used_at).toLocaleString():"nunca"}</small></div>{k.revoked_at?<span className="revoked">Revogada</span>:<button className="revoke-key" disabled={busy} onClick={()=>revoke(k)}>Revogar</button>}</article>)}</div>
