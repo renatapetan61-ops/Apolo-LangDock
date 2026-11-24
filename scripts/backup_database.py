@@ -60,6 +60,7 @@ def create_backup(source: Path, output: Path, encryption_key: str | None) -> dic
         if encryption_key:
             payload = Fernet(encryption_key.encode("ascii")).encrypt(payload)
         output.write_bytes(payload)
+        os.chmod(output, 0o600)
     return {**manifest, "encrypted": bool(encryption_key), "backup": str(output)}
 
 
@@ -93,6 +94,7 @@ def restore_backup(backup: Path, destination: Path, encryption_key: str | None, 
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = destination.with_name(destination.name + ".restore-tmp")
         shutil.copy2(snapshot_path, staging)
+        os.chmod(staging, 0o600)
         os.replace(staging, destination)
     return {"restored": str(destination), "sha256": manifest["sha256"], "integrity_check": "ok"}
 
