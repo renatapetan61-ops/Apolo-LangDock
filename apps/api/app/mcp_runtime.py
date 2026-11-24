@@ -16,12 +16,16 @@ class MCPRuntimeError(RuntimeError):
 
 def validate_http_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise MCPRuntimeError("MCP HTTP endpoints must use HTTPS and must not embed credentials.")
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise MCPRuntimeError("MCP HTTP endpoints must use HTTPS and must not embed credentials, query tokens, or fragments.")
     allowed = {item.strip().lower() for item in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if item.strip()}
     if not allowed or parsed.hostname.lower() not in allowed:
         raise MCPRuntimeError("The MCP host is not in the server-side MCP_ALLOWED_HOSTS allowlist.")
-    if parsed.port not in (None, 443):
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise MCPRuntimeError("The MCP endpoint port is invalid.") from exc
+    if port not in (None, 443):
         raise MCPRuntimeError("Only the default HTTPS port is permitted for remote MCP servers.")
     return endpoint
 
