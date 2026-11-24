@@ -44,9 +44,12 @@
 - [ ] Webhooks and external integrations
 
 ## Milestone 5 — MCP
-- [ ] MCP client with stdio and Streamable HTTP transports
-- [ ] MCP server publishing for selected APOLO tools
-- [ ] Per-server trust settings, authentication, and tool approvals
+- [x] MCP client with Streamable HTTP and administrator-allowlisted stdio transports
+- [x] Workspace-scoped MCP server registry and tool discovery
+- [x] Per-tool explicit approval and revocation before invocation
+- [x] Separate read-only APOLO MCP server over Streamable HTTP (local-only Compose binding)
+- [ ] Remote MCP OAuth/bearer credential vault and secret rotation
+- [ ] Audit log, quotas, and per-tool policy scopes
 
 ## Milestone 6 — Production readiness
 - [ ] Automated tests, dependency scanning, and security review
