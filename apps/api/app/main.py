@@ -334,7 +334,7 @@ async def _openai_stream(base_url: str, key: str | None, model: str, body: dict[
     if key: headers["Authorization"]=f"Bearer {key}"
     async with httpx.AsyncClient(timeout=None) as client:
         async with client.stream("POST",f"{base_url.rstrip('/')}/chat/completions",
-             headers=headers,json={**body,"model":model,"stream":True}) as response:
+             headers=headers,json={**body,"model":model,"stream":True,"stream_options":{"include_usage":True}}) as response:
             if response.status_code >= 400:
                 detail=(await response.aread()).decode("utf-8","replace")[:1000]
                 yield "event: error\ndata: "+_json.dumps({"error":detail})+"\n\n"
@@ -347,6 +347,8 @@ async def _openai_stream(base_url: str, key: str | None, model: str, body: dict[
                     return
                 try:
                     packet=_json.loads(raw)
+                    if isinstance(packet.get("usage"), dict):
+                        yield "event: usage\ndata: "+_json.dumps(packet["usage"])+"\n\n"
                     delta=packet.get("choices",[{}])[0].get("delta",{}).get("content")
                     if delta:
                         yield "data: "+_json.dumps({"delta":delta},ensure_ascii=False)+"\n\n"
@@ -372,7 +374,13 @@ async def _anthropic_stream(model: str, messages: list[ChatMessage], max_tokens:
                 if line.startswith("data:"):
                     try:
                         event=_json.loads(line[5:].strip())
-                        if event.get("type")=="content_block_delta":
+                        if event.get("type")=="message_start":
+                            usage=event.get("message",{}).get("usage")
+                            if isinstance(usage,dict): yield "event: usage\ndata: "+_json.dumps(usage)+"\n\n"
+                        elif event.get("type")=="message_delta":
+                            usage=event.get("usage")
+                            if isinstance(usage,dict): yield "event: usage\ndata: "+_json.dumps(usage)+"\n\n"
+                        elif event.get("type")=="content_block_delta":
                             delta=event.get("delta",{}).get("text")
                             if delta: yield "data: "+_json.dumps({"delta":delta},ensure_ascii=False)+"\n\n"
                     except ValueError: pass
@@ -397,12 +405,32 @@ async def _google_stream(model: str, messages: list[ChatMessage], max_tokens: in
                 if line.startswith("data:"):
                     try:
                         packet=_json.loads(line[5:].strip())
+                        usage=packet.get("usageMetadata")
+                        if isinstance(usage,dict): yield "event: usage\ndata: "+_json.dumps(usage)+"\n\n"
                         for part in packet.get("candidates",[{}])[0].get("content",{}).get("parts",[]):
                             delta=part.get("text")
                             if delta: yield "data: "+_json.dumps({"delta":delta},ensure_ascii=False)+"\n\n"
                     except (ValueError,IndexError,TypeError): pass
     yield "data: [DONE]\n\n"
 
+async def _meter_stream(generator, http_request: Request, model_id: str, provider: str):
+    usage: dict[str, Any] = {}
+    completed = False
+    started = time.monotonic()
+    try:
+        async for chunk in generator:
+            if chunk.startswith("event: usage"):
+                try:
+                    packet = _json.loads(chunk.split("data:", 1)[1].strip())
+                    if isinstance(packet, dict): usage.update(packet)
+                except (IndexError, ValueError):
+                    pass
+            if "data: [DONE]" in chunk: completed = True
+            yield chunk
+    finally:
+        _record_usage(http_request, model_id, provider, usage, {},
+                      int((time.monotonic() - started) * 1000),
+                      "succeeded" if completed else "failed")
 @app.post("/api/v1/chat/stream")
 async def chat_stream(request: ChatRequest, http_request: Request):
     provider, separator, model=request.model.partition("/")
@@ -420,7 +448,8 @@ async def chat_stream(request: ChatRequest, http_request: Request):
         generator=_anthropic_stream(model,request.messages,request.max_tokens or 1024,request.temperature or 0.7)
     else:
         generator=_google_stream(model,request.messages,request.max_tokens or 1024,request.temperature or 0.7)
-    return StreamingResponse(generator,media_type="text/event-stream",
+    _check_workspace_quota(http_request)
+    return StreamingResponse(_meter_stream(generator,http_request,request.model,provider),media_type="text/event-stream",
         headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
 
 
