@@ -594,3 +594,48 @@ def test_mcp_oauth_pkce_start_callback_and_replay(monkeypatch):
     assert cred and cred["access_ciphertext"] != "access-token-test"
     replay = client.get("/api/v1/mcp/oauth/callback", params={"code": "one-time-code", "state": state})
     assert replay.status_code == 400
+
+
+def test_webhook_delivery_is_durable_and_retry_worker_retries(monkeypatch):
+    from cryptography.fernet import Fernet
+    from app.main import _db
+    owner = workspace_headers()
+    monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("WEBHOOK_ALLOWED_HOSTS", "hooks.example.test")
+    monkeypatch.setenv("APOLO_WEBHOOK_WORKER_TOKEN", "worker-secret-for-tests")
+    created = client.post("/api/v1/webhooks", headers=owner, json={
+        "name": "Retry hook", "url": "https://hooks.example.test/events",
+        "secret": "a-long-webhook-signing-secret-123", "events": ["test.ping"]
+    })
+    assert created.status_code == 200
+    calls = {"count": 0}
+    class FakeResponse:
+        text = ""
+        def __init__(self, status): self.status_code = status
+    class FakeClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def post(self, *args, **kwargs):
+            calls["count"] += 1
+            return FakeResponse(503 if calls["count"] == 1 else 204)
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeClient)
+    first = client.post(f"/api/v1/webhooks/{created.json()['id']}/test", headers=owner)
+    assert first.status_code == 200 and first.json()["delivered"] is False
+    delivery_id = first.json()["id"]
+    with _db() as conn:
+        row = conn.execute("SELECT attempts,next_attempt_at,delivered_at FROM webhook_deliveries WHERE id=?",
+                           (delivery_id,)).fetchone()
+        assert row["attempts"] == 1 and row["next_attempt_at"] is not None
+        conn.execute("UPDATE webhook_deliveries SET next_attempt_at=? WHERE id=?",
+                     ("2000-01-01T00:00:00+00:00", delivery_id))
+    unauthorized = client.post("/internal/webhooks/dispatch")
+    assert unauthorized.status_code == 401
+    retried = client.post("/internal/webhooks/dispatch",
+                          headers={"X-APOLO-Worker-Token": "worker-secret-for-tests"})
+    assert retried.status_code == 200 and retried.json()["processed"] == 1
+    with _db() as conn:
+        row = conn.execute("SELECT attempts,delivered_at,next_attempt_at FROM webhook_deliveries WHERE id=?",
+                           (delivery_id,)).fetchone()
+    assert row["attempts"] == 2 and row["delivered_at"] is not None
+    assert row["next_attempt_at"] is None
