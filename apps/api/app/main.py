@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 APP_VERSION = "0.3.0"
 app = FastAPI(title="APOLO LangDock API", version=APP_VERSION, description="Open AI workspace API. Provider quotas and pricing are controlled by upstream providers.")
 origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if item.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization", "X-Workspace-ID", "X-API-Key"])
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization", "X-Workspace-ID", "X-API-Key"])
 
 PROVIDER_INFO = {
     "openrouter": ("OpenRouter", "Selected free routes; quotas and availability vary."),
@@ -1063,6 +1063,7 @@ async def create_api_key(payload: dict = Body(default={}), request: Request = No
                      (key_id, request.state.workspace_id, name, _token_hash(raw), raw[:16],
                       _json.dumps(scopes), expires, now))
     _audit(request.state.workspace_id, request.state.user_id, "api_key.created", "api_key", key_id, {"name": name, "scopes": scopes, "expires_at": expires})
+    await _emit_webhook_event(request.state.workspace_id, "api_key.created", {"api_key_id": key_id, "name": name, "scopes": scopes})
     return {"id": key_id, "name": name, "api_key": raw, "key_prefix": raw[:16],
             "scopes": scopes, "expires_at": expires, "warning": "Copy this key now. It cannot be displayed again."}
 
@@ -1085,6 +1086,7 @@ async def revoke_api_key(key_id: str, request: Request):
     if not result.rowcount:
         raise HTTPException(status_code=404, detail="Active API key not found.")
     _audit(request.state.workspace_id, request.state.user_id, "api_key.revoked", "api_key", key_id)
+    await _emit_webhook_event(request.state.workspace_id, "api_key.revoked", {"api_key_id": key_id})
     return {"revoked": True, "id": key_id}
 
 
@@ -1418,7 +1420,7 @@ async def create_webhook(payload: dict = Body(...), request: Request = None):
     _require_workspace_role(request, {"owner", "admin"})
     name, url, secret = payload.get("name"), payload.get("url"), payload.get("secret")
     events = payload.get("events", ["api_key.created", "api_key.revoked", "usage.recorded"])
-    allowed_events = {"api_key.created", "api_key.revoked", "usage.recorded", "mcp.tool.called"}
+    allowed_events = {"api_key.created", "api_key.revoked", "usage.recorded", "mcp.tool.called", "test.ping"}
     if not isinstance(name, str) or not name.strip() or len(name) > 100:
         raise HTTPException(status_code=422, detail="Webhook name is required (max 100 characters).")
     if not isinstance(secret, str) or len(secret) < 24 or len(secret) > 512:
@@ -1460,6 +1462,14 @@ async def delete_webhook(webhook_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Webhook not found.")
     _audit(request.state.workspace_id, request.state.user_id, "webhook.deleted", "webhook", webhook_id)
     return {"deleted": True, "id": webhook_id}
+
+
+async def _emit_webhook_event(workspace_id: str, event_type: str, payload: dict):
+    with _db() as conn:
+        rows = conn.execute("SELECT id FROM webhook_endpoints WHERE workspace_id=? AND active=1",
+                            (workspace_id,)).fetchall()
+    for row in rows:
+        await _deliver_webhook(row["id"], workspace_id, event_type, payload)
 
 
 async def _deliver_webhook(webhook_id: str, workspace_id: str, event_type: str, payload: dict) -> dict:
