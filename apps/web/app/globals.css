@@ -52,3 +52,21 @@ h1 { font-size: clamp(30px, 5vw, 48px); margin: 12px 0; }
 .text-button{border:0;background:transparent;color:var(--accent,#9187ff);font:inherit;font-weight:700;cursor:pointer}
 .error{color:#ff8585}
 .logout{width:100%;margin-top:16px;padding:10px;border:1px solid var(--border,#30394b);border-radius:9px;background:transparent;color:inherit;cursor:pointer}
+
+.tool-page{width:min(1180px,calc(100% - 32px));margin:42px auto}
+.tool-header{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:26px}
+.tool-header h1{margin:8px 0}.tool-header a{color:var(--accent,#9187ff)}
+.agent-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.tool-card{padding:22px}.tool-card h2{margin-top:0}
+.tool-form{display:grid;gap:14px}.tool-form label{display:grid;gap:7px;font-size:13px;font-weight:600}
+.tool-form input,.tool-form textarea,.tool-form select{width:100%;padding:11px 12px;border:1px solid var(--border,#30394b);border-radius:9px;background:var(--surface,#101827);color:inherit;font:inherit}
+.tool-form button{padding:12px;border:0;border-radius:9px;background:var(--accent,#7468f0);color:white;font-weight:700;cursor:pointer}
+.tool-form button:disabled{opacity:.5;cursor:not-allowed}
+.agent-list{display:grid;gap:8px;max-height:280px;overflow:auto;margin-bottom:18px}
+.agent-list button{display:grid;gap:5px;text-align:left;padding:12px;border:1px solid var(--border,#30394b);border-radius:9px;background:transparent;color:inherit;cursor:pointer}
+.agent-list button.selected{border-color:var(--accent,#7468f0);background:rgba(116,104,240,.12)}
+.agent-list span,.agent-list small{opacity:.7}
+.secondary-button{background:transparent!important;border:1px solid var(--border,#30394b)!important;color:inherit!important}
+.output-card{grid-column:1/-1}.output-card pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;border-radius:10px;background:var(--surface,#101827)}
+.trace-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border,#30394b);font-size:13px}
+@media(max-width:760px){.agent-grid{grid-template-columns:1fr}.output-card{grid-column:auto}.tool-header{flex-direction:column}}
