@@ -1064,6 +1064,8 @@ def _authenticate_api_key(request: Request, required_scope: str) -> dict:
     cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(minutes=1)).isoformat()
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        retention_cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(days=2)).isoformat()
+        conn.execute("DELETE FROM api_key_requests WHERE created_at<?", (retention_cutoff,))
         count = conn.execute("SELECT COUNT(*) FROM api_key_requests WHERE key_id=? AND created_at>=?",
                              (row["id"], cutoff)).fetchone()[0]
         if count >= rpm:
