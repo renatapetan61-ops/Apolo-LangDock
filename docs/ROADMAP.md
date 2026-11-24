@@ -51,7 +51,8 @@
 - [ ] Durable execution queue and run history
 - [x] Workspace webhook endpoint registry, encrypted signing secrets, HTTPS host allowlist, HMAC-signed delivery, event hooks, and delivery history
 - [x] Durable webhook delivery records, authenticated dispatch worker, exponential retries/backoff (8 attempts), and delivery history API
-- [ ] Webhook management UI, dead-letter replay controls, and external integrations
+- [x] Webhook management UI for endpoint creation, test delivery, and delivery history
+- [ ] Dead-letter replay controls and additional external integrations
 
 ## Milestone 5 — MCP
 - [x] MCP client with Streamable HTTP and administrator-allowlisted stdio transports
