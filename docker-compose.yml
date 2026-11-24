@@ -4,6 +4,8 @@ services:
       context: ./apps/api
     env_file:
       - .env
+    environment:
+      APOLO_DB_PATH: /data/apolo-langdock.sqlite3
     ports:
       - "8000:8000"
     volumes:
