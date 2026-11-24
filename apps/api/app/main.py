@@ -751,7 +751,7 @@ with _db() as conn:
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS mcp_servers(
       id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
-      transport TEXT NOT NULL, endpoint TEXT, config_key TEXT,
+      transport TEXT NOT NULL, endpoint TEXT, config_key TEXT, auth_ciphertext TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS mcp_tools(
@@ -762,6 +762,9 @@ with _db() as conn:
       FOREIGN KEY(server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
     );
     """)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(mcp_servers)").fetchall()}
+    if "auth_ciphertext" not in columns:
+        conn.execute("ALTER TABLE mcp_servers ADD COLUMN auth_ciphertext TEXT")
 
 
 @app.get("/api/v1/mcp/servers")
@@ -778,11 +781,18 @@ async def register_mcp_server(payload: dict = Body(...), request: Request = None
     transport = payload.get("transport")
     if not name or len(name) > 100:
         raise HTTPException(status_code=422, detail="A server name (max 100 characters) is required.")
-    endpoint, config_key = None, None
+    endpoint, config_key, auth_ciphertext = None, None, None
+    bearer_token = payload.get("bearer_token")
+    if bearer_token is not None and (not isinstance(bearer_token, str) or not bearer_token.strip() or len(bearer_token) > 4096):
+        raise HTTPException(status_code=422, detail="bearer_token must be a non-empty string up to 4096 characters.")
     try:
         if transport == "streamable-http":
             endpoint = _mcp_validate_endpoint(str(payload.get("endpoint") or ""))
+            if bearer_token:
+                auth_ciphertext = _mcp_encrypt_secret(bearer_token.strip())
         elif transport == "stdio":
+            if bearer_token:
+                raise MCPRuntimeError("Bearer credentials are supported only for Streamable HTTP servers.")
             config_key = str(payload.get("config_key") or "")
             if not config_key or len(config_key) > 80:
                 raise MCPRuntimeError("A valid administrator-configured stdio alias is required.")
@@ -793,8 +803,8 @@ async def register_mcp_server(payload: dict = Body(...), request: Request = None
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     server_id, now = str(uuid.uuid4()), _now()
     with _db() as conn:
-        conn.execute("INSERT INTO mcp_servers(id,workspace_id,name,transport,endpoint,config_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                     (server_id, request.state.workspace_id, name, transport, endpoint, config_key, now, now))
+        conn.execute("INSERT INTO mcp_servers(id,workspace_id,name,transport,endpoint,config_key,auth_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                     (server_id, request.state.workspace_id, name, transport, endpoint, config_key, auth_ciphertext, now, now))
     return {"id": server_id, "name": name, "transport": transport, "created_at": now}
 
 
@@ -819,7 +829,7 @@ async def discover_mcp_server_tools(server_id: str, request: Request):
         raise HTTPException(status_code=404, detail="MCP server not found.")
     try:
         found = await asyncio.wait_for(
-            _mcp_discover_tools(server["transport"], server["endpoint"], server["config_key"]), timeout=25
+            _mcp_discover_tools(server["transport"], server["endpoint"], server["config_key"], _mcp_decrypt_secret(server["auth_ciphertext"])), timeout=25
         )
     except (MCPRuntimeError, Exception) as exc:
         raise HTTPException(status_code=502, detail=f"MCP discovery failed: {str(exc)[:300]}") from exc
@@ -885,7 +895,7 @@ async def call_approved_mcp_tool(server_id: str, tool_name: str, payload: dict =
         raise HTTPException(status_code=403, detail="This MCP tool has not been approved by the workspace.")
     try:
         result = await asyncio.wait_for(
-            _mcp_invoke_tool(row["transport"], tool_name, arguments, row["endpoint"], row["config_key"]),
+            _mcp_invoke_tool(row["transport"], tool_name, arguments, row["endpoint"], row["config_key"], _mcp_decrypt_secret(row["auth_ciphertext"])),
             timeout=30
         )
     except asyncio.TimeoutError as exc:
@@ -893,3 +903,55 @@ async def call_approved_mcp_tool(server_id: str, tool_name: str, payload: dict =
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"MCP tool execution failed: {str(exc)[:300]}") from exc
     return result
+
+
+# MCP bearer credentials are encrypted at rest; configure a private Fernet key outside source control.
+from cryptography.fernet import Fernet, InvalidToken
+
+def _mcp_fernet() -> Fernet:
+    key = os.getenv("APOLO_MCP_ENCRYPTION_KEY", "").strip()
+    if not key:
+        raise HTTPException(status_code=503, detail="Configure APOLO_MCP_ENCRYPTION_KEY before storing MCP credentials.")
+    try:
+        return Fernet(key.encode("ascii"))
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise HTTPException(status_code=500, detail="APOLO_MCP_ENCRYPTION_KEY is invalid.") from exc
+
+def _mcp_encrypt_secret(secret: str) -> str:
+    return _mcp_fernet().encrypt(secret.encode("utf-8")).decode("ascii")
+
+def _mcp_decrypt_secret(ciphertext: str | None) -> str | None:
+    if not ciphertext:
+        return None
+    try:
+        return _mcp_fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
+    except InvalidToken as exc:
+        raise HTTPException(status_code=500, detail="Stored MCP credential cannot be decrypted; verify the encryption key.") from exc
+
+
+@app.post("/api/v1/mcp/servers/{server_id}/credentials")
+async def set_mcp_server_credentials(server_id: str, payload: dict = Body(...), request: Request = None):
+    token = payload.get("bearer_token")
+    if not isinstance(token, str) or not token.strip() or len(token) > 4096:
+        raise HTTPException(status_code=422, detail="A bearer_token up to 4096 characters is required.")
+    with _db() as conn:
+        server = conn.execute("SELECT transport FROM mcp_servers WHERE id=? AND workspace_id=?",
+                              (server_id, request.state.workspace_id)).fetchone()
+        if not server:
+            raise HTTPException(status_code=404, detail="MCP server not found.")
+        if server["transport"] != "streamable-http":
+            raise HTTPException(status_code=400, detail="Bearer credentials are supported only for Streamable HTTP.")
+        encrypted = _mcp_encrypt_secret(token.strip())
+        conn.execute("UPDATE mcp_servers SET auth_ciphertext=?,updated_at=? WHERE id=? AND workspace_id=?",
+                     (encrypted, _now(), server_id, request.state.workspace_id))
+    return {"server_id": server_id, "credential_configured": True}
+
+
+@app.delete("/api/v1/mcp/servers/{server_id}/credentials")
+async def delete_mcp_server_credentials(server_id: str, request: Request):
+    with _db() as conn:
+        result = conn.execute("UPDATE mcp_servers SET auth_ciphertext=NULL,updated_at=? WHERE id=? AND workspace_id=?",
+                              (_now(), server_id, request.state.workspace_id))
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="MCP server not found.")
+    return {"server_id": server_id, "credential_configured": False}
