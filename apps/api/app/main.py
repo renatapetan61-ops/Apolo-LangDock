@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -123,7 +123,7 @@ async def models(refresh: bool = False):
     return {"models": discovered, "discovery": "live", "providers_queried": [p for p in PROVIDER_INFO if _configured(p)], "providers_with_errors": errors}
 
 @app.post("/api/v1/chat/completions")
-async def chat_completions(request: ChatRequest):
+async def chat_completions(request: ChatRequest, http_request: Request):
     provider, separator, model = request.model.partition("/")
     if not separator or not model or provider not in PROVIDER_INFO:
         raise HTTPException(status_code=400, detail="Use a supported provider/model identifier.")
@@ -187,7 +187,7 @@ def _init_db():
     with _db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS conversations (
-          id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT,
+          id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT NOT NULL, model TEXT,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS messages (
@@ -196,15 +196,19 @@ def _init_db():
           FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS agents (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+          id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
           instructions TEXT NOT NULL DEFAULT '', model TEXT, tools TEXT NOT NULL DEFAULT '[]',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS workflows (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+          id TEXT PRIMARY KEY, workspace_id TEXT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
           definition TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         """)
+        for table in ("conversations", "agents", "workflows"):
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(" + table + ")").fetchall()}
+            if "workspace_id" not in columns:
+                conn.execute("ALTER TABLE " + table + " ADD COLUMN workspace_id TEXT")
         conn.execute("PRAGMA foreign_keys=ON")
 
 _init_db()
@@ -213,32 +217,33 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 @app.get("/api/v1/conversations")
-async def list_conversations():
+async def list_conversations(request: Request):
+    workspace_id = request.state.workspace_id
     with _db() as conn:
-        rows = conn.execute("SELECT * FROM conversations ORDER BY updated_at DESC").fetchall()
+        rows = conn.execute("SELECT * FROM conversations WHERE workspace_id=? ORDER BY updated_at DESC", (workspace_id,)).fetchall()
     return {"conversations": [dict(row) for row in rows]}
 
 @app.post("/api/v1/conversations")
-async def create_conversation(payload: dict = Body(default={})):
+async def create_conversation(payload: dict = Body(default={}), request: Request = None):
     conversation_id = str(uuid.uuid4())
     now = _now()
     title = str(payload.get("title") or "Nova conversa")[:160]
     model = payload.get("model")
     with _db() as conn:
-        conn.execute("INSERT INTO conversations(id,title,model,created_at,updated_at) VALUES(?,?,?,?,?)",
-                     (conversation_id,title,model,now,now))
+        conn.execute("INSERT INTO conversations(id,workspace_id,title,model,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                     (conversation_id,request.state.workspace_id,title,model,now,now))
     return {"id":conversation_id,"title":title,"model":model,"created_at":now,"updated_at":now}
 
 @app.get("/api/v1/conversations/{conversation_id}/messages")
-async def list_messages(conversation_id: str):
+async def list_messages(conversation_id: str, request: Request):
     with _db() as conn:
-        exists = conn.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+        exists = conn.execute("SELECT 1 FROM conversations WHERE id=? AND workspace_id=?", (conversation_id,request.state.workspace_id)).fetchone()
         if not exists: raise HTTPException(status_code=404, detail="Conversation not found.")
-        rows = conn.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at", (conversation_id,)).fetchall()
+        rows = conn.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at", (conversation_id,request.state.workspace_id)).fetchall()
     return {"messages":[dict(row) for row in rows]}
 
 @app.post("/api/v1/conversations/{conversation_id}/messages")
-async def add_message(conversation_id: str, payload: dict = Body(...)):
+async def add_message(conversation_id: str, payload: dict = Body(...), request: Request = None):
     role, content = payload.get("role"), payload.get("content")
     if role not in {"user","assistant","system"} or not isinstance(content,str) or not content.strip():
         raise HTTPException(status_code=422, detail="A valid role and non-empty content are required.")
@@ -252,51 +257,58 @@ async def add_message(conversation_id: str, payload: dict = Body(...)):
     return {"id":message_id,"conversation_id":conversation_id,"role":role,"content":content,"created_at":now}
 
 @app.delete("/api/v1/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str):
+async def delete_conversation(conversation_id: str, request: Request):
     with _db() as conn:
         conn.execute("PRAGMA foreign_keys=ON")
-        result = conn.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
+        result = conn.execute("DELETE FROM conversations WHERE id=? AND workspace_id=?", (conversation_id,))
         if not result.rowcount: raise HTTPException(status_code=404, detail="Conversation not found.")
         conn.execute("DELETE FROM messages WHERE conversation_id=?", (conversation_id,))
     return {"deleted":True,"id":conversation_id}
 
 @app.get("/api/v1/agents")
-async def list_agents():
-    with _db() as conn: rows=conn.execute("SELECT * FROM agents ORDER BY updated_at DESC").fetchall()
+async def list_agents(request: Request):
+    with _db() as conn: rows=conn.execute("SELECT * FROM agents WHERE workspace_id=? ORDER BY updated_at DESC",(request.state.workspace_id,)).fetchall()
     return {"agents":[{**dict(row),"tools":_json.loads(row["tools"])} for row in rows]}
 
 @app.post("/api/v1/agents")
-async def save_agent(payload: dict = Body(...)):
+async def save_agent(payload: dict = Body(...), request: Request = None):
     name=str(payload.get("name") or "").strip()
     if not name: raise HTTPException(status_code=422, detail="Agent name is required.")
     agent_id=str(payload.get("id") or uuid.uuid4()); now=_now()
     tools=payload.get("tools",[])
     if not isinstance(tools,list) or len(tools)>30: raise HTTPException(status_code=422, detail="tools must be a list with at most 30 entries.")
     with _db() as conn:
-        conn.execute("""INSERT INTO agents(id,name,description,instructions,model,tools,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
-        instructions=excluded.instructions,model=excluded.model,tools=excluded.tools,updated_at=excluded.updated_at""",
-        (agent_id,name,str(payload.get("description",""))[:1000],str(payload.get("instructions",""))[:12000],
+        existing=conn.execute("SELECT workspace_id FROM agents WHERE id=?",(agent_id,)).fetchone()
+        if existing and existing["workspace_id"] != request.state.workspace_id:
+            raise HTTPException(status_code=404,detail="Agent not found.")
+        conn.execute("""INSERT INTO agents(id,workspace_id,name,description,instructions,model,tools,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
+        instructions=excluded.instructions,model=excluded.model,tools=excluded.tools,updated_at=excluded.updated_at
+        WHERE agents.workspace_id=excluded.workspace_id""",
+        (agent_id,request.state.workspace_id,name,str(payload.get("description",""))[:1000],str(payload.get("instructions",""))[:12000],
          payload.get("model"),_json.dumps(tools),now,now))
     return {"id":agent_id,"name":name,"saved":True}
 
 @app.get("/api/v1/workflows")
-async def list_workflows():
-    with _db() as conn: rows=conn.execute("SELECT * FROM workflows ORDER BY updated_at DESC").fetchall()
+async def list_workflows(request: Request):
+    with _db() as conn: rows=conn.execute("SELECT * FROM workflows WHERE workspace_id=? ORDER BY updated_at DESC",(request.state.workspace_id,)).fetchall()
     return {"workflows":[{**dict(row),"definition":_json.loads(row["definition"])} for row in rows]}
 
 @app.post("/api/v1/workflows")
-async def save_workflow(payload: dict = Body(...)):
+async def save_workflow(payload: dict = Body(...), request: Request = None):
     name=str(payload.get("name") or "").strip()
     definition=payload.get("definition",{})
     if not name or not isinstance(definition,dict): raise HTTPException(status_code=422, detail="A workflow name and JSON definition are required.")
     if len(_json.dumps(definition))>100000: raise HTTPException(status_code=413, detail="Workflow definition is too large.")
     workflow_id=str(payload.get("id") or uuid.uuid4()); now=_now()
     with _db() as conn:
-        conn.execute("""INSERT INTO workflows(id,name,description,definition,created_at,updated_at)
-        VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
-        definition=excluded.definition,updated_at=excluded.updated_at""",
-        (workflow_id,name,str(payload.get("description",""))[:1000],_json.dumps(definition),now,now))
+        existing=conn.execute("SELECT workspace_id FROM workflows WHERE id=?",(workflow_id,)).fetchone()
+        if existing and existing["workspace_id"] != request.state.workspace_id:
+            raise HTTPException(status_code=404,detail="Workflow not found.")
+        conn.execute("""INSERT INTO workflows(id,workspace_id,name,description,definition,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
+        definition=excluded.definition,updated_at=excluded.updated_at WHERE workflows.workspace_id=excluded.workspace_id""",
+        (workflow_id,request.state.workspace_id,name,str(payload.get("description",""))[:1000],_json.dumps(definition),now,now))
     return {"id":workflow_id,"name":name,"saved":True}
 
 
@@ -379,7 +391,7 @@ async def _google_stream(model: str, messages: list[ChatMessage], max_tokens: in
     yield "data: [DONE]\n\n"
 
 @app.post("/api/v1/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, http_request: Request):
     provider, separator, model=request.model.partition("/")
     if not separator or not model or provider not in PROVIDER_INFO:
         raise HTTPException(status_code=400,detail="Use a supported provider/model identifier.")
@@ -482,3 +494,36 @@ async def list_workspaces(user:dict=Depends(_current_user)):
         rows=conn.execute("""SELECT w.id,w.name,w.created_at,m.role FROM workspaces w
         JOIN workspace_members m ON m.workspace_id=w.id WHERE m.user_id=? ORDER BY w.created_at""",(user["id"],)).fetchall()
     return {"workspaces":[dict(row) for row in rows]}
+
+
+# Private API guard: bearer identity plus explicit workspace membership.
+from fastapi.responses import JSONResponse
+
+@app.middleware("http")
+async def enforce_identity_and_workspace(request: Request, call_next):
+    path = request.url.path
+    public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models"}
+    if path.startswith("/api/v1/") and not public:
+        auth = request.headers.get("authorization", "")
+        if not auth.lower().startswith("bearer "):
+            return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+        token = auth.split(" ", 1)[1].strip()
+        with _db() as conn:
+            row = conn.execute("""SELECT u.id,u.email FROM sessions s JOIN users u ON u.id=s.user_id
+                WHERE s.token_hash=? AND s.expires_at>?""", (_token_hash(token), _now())).fetchone()
+        if not row:
+            return JSONResponse(status_code=401, content={"detail": "Session invalid or expired."})
+        request.state.user_id = row["id"]
+        scoped = (path.startswith("/api/v1/conversations") or path.startswith("/api/v1/agents")
+                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/chat/"))
+        if scoped:
+            workspace_id = request.headers.get("x-workspace-id", "").strip()
+            if not workspace_id:
+                return JSONResponse(status_code=400, content={"detail": "X-Workspace-ID header is required."})
+            with _db() as conn:
+                member = conn.execute("SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                                      (workspace_id, row["id"])).fetchone()
+            if not member:
+                return JSONResponse(status_code=403, content={"detail": "Workspace access denied."})
+            request.state.workspace_id = workspace_id
+    return await call_next(request)
