@@ -29,7 +29,9 @@
 - [ ] Email verification, advanced rate limiting, and secrets management for provider credentials
 - [ ] Runtime database abstraction and PostgreSQL as the production backend
 - [x] One-way SQLite-to-PostgreSQL migration utility with dependency ordering and row-count verification
-- [ ] Versioned schema migrations, rollback strategy, and automated restorable backups
+- [ ] Versioned schema migrations and rollback strategy
+- [x] SQLite online snapshot backup, optional Fernet encryption, SHA-256 verification, and tested restore utility
+- [ ] Scheduled off-host backups, retention policy, and restore drills
 
 ## Milestone 3 — Agents and tools
 - [x] Agent registry API with instructions, model selection, and tool metadata
