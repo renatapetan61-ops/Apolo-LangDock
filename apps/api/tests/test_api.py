@@ -466,3 +466,44 @@ def test_member_cannot_manage_workspace_secrets_or_mcp_policy():
     }).status_code == 403
     assert client.put("/api/v1/usage/limits", headers=member_headers,
                       json={"monthly_request_limit": 10}).status_code == 403
+
+
+def test_api_key_monthly_quotas_and_usage_visibility():
+    owner = workspace_headers()
+    key = client.post("/api/v1/api-keys", headers=owner, json={
+        "name": "budgeted", "scopes": ["chat:completions"]
+    }).json()
+    key_id = key["id"]
+    assert client.put(f"/api/v1/api-keys/{key_id}/limits", headers=owner,
+                      json={"monthly_token_limit": 10, "monthly_request_limit": 2}).status_code == 200
+    with __import__("app.main", fromlist=["_db"])._db() as conn:
+        conn.execute("""INSERT INTO usage_events(id,workspace_id,api_key_id,provider,model,total_tokens,
+            latency_ms,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), owner["X-Workspace-ID"], key_id, "openai", "gpt-test", 10, 2,
+             "succeeded", __import__("app.main", fromlist=["_now"])._now()))
+    # API key's workspace monthly quota is enforced before contacting any provider.
+    response = client.post("/api/v1/public/chat/completions", headers={"X-API-Key": key["api_key"]},
+                           json={"model": "ollama/demo", "messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 429
+    usage = client.get(f"/api/v1/api-keys/{key_id}/usage", headers=owner)
+    assert usage.status_code == 200 and usage.json()["totals"]["tokens"] == 10
+
+
+def test_webhook_registry_encryption_and_allowlist(monkeypatch):
+    owner = workspace_headers()
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("WEBHOOK_ALLOWED_HOSTS", "hooks.example.test")
+    created = client.post("/api/v1/webhooks", headers=owner, json={
+        "name": "Build hook", "url": "https://hooks.example.test/events",
+        "secret": "a-long-webhook-signing-secret-123", "events": ["usage.recorded"]
+    })
+    assert created.status_code == 200
+    assert "secret" not in client.get("/api/v1/webhooks", headers=owner).text
+    assert client.get("/api/v1/webhooks", headers=workspace_headers()).json()["webhooks"] == []
+    bad = client.post("/api/v1/webhooks", headers=owner, json={
+        "name": "Bad", "url": "http://127.0.0.1/admin",
+        "secret": "a-long-webhook-signing-secret-123"
+    })
+    assert bad.status_code in {400, 422}
+    assert client.delete(f"/api/v1/webhooks/{created.json()['id']}", headers=owner).status_code == 200
