@@ -50,7 +50,7 @@
 - [ ] Triggers, schedules, conditions, loops, and retries
 - [ ] Durable execution queue and run history
 - [x] Workspace webhook endpoint registry, encrypted signing secrets, HTTPS host allowlist, HMAC-signed delivery, event hooks, and delivery history
-- [x] Durable webhook delivery records, authenticated dispatch worker, exponential retries/backoff (8 attempts), and delivery history API
+- [x] Durable webhook delivery records, authenticated dispatch worker, exponential retries/backoff (8 attempts), delivery history API, and scheduled GitHub Actions runner
 - [x] Webhook management UI for endpoint creation, test delivery, and delivery history
 - [ ] Dead-letter replay controls and additional external integrations
 
