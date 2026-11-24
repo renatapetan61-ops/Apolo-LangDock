@@ -507,3 +507,35 @@ def test_webhook_registry_encryption_and_allowlist(monkeypatch):
     })
     assert bad.status_code in {400, 422}
     assert client.delete(f"/api/v1/webhooks/{created.json()['id']}", headers=owner).status_code == 200
+
+
+def test_webhook_signed_test_delivery(monkeypatch):
+    from cryptography.fernet import Fernet
+    import hashlib, hmac
+    owner = workspace_headers()
+    monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("WEBHOOK_ALLOWED_HOSTS", "hooks.example.test")
+    created = client.post("/api/v1/webhooks", headers=owner, json={
+        "name": "Test delivery", "url": "https://hooks.example.test/events",
+        "secret": "a-long-webhook-signing-secret-123", "events": ["test.ping"]
+    })
+    assert created.status_code == 200
+    import asyncio
+    captured = {}
+    class FakeResponse:
+        status_code = 204
+        text = ""
+    class FakeClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def post(self, url, content, headers):
+            captured.update({"url": url, "body": content, "headers": headers})
+            expected = hmac.new(b"a-long-webhook-signing-secret-123", content.encode(), hashlib.sha256).hexdigest()
+            assert headers["X-APOLO-Signature"] == "sha256=" + expected
+            return FakeResponse()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeClient)
+    result = client.post(f"/api/v1/webhooks/{created.json()['id']}/test", headers=owner)
+    assert result.status_code == 200 and result.json()["delivered"] is True
+    deliveries = client.get(f"/api/v1/webhooks/{created.json()['id']}/deliveries", headers=owner)
+    assert deliveries.json()["deliveries"][0]["status_code"] == 204
