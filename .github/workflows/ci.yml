@@ -54,6 +54,7 @@ jobs:
           --health-retries 5
     env:
       APOLO_DB_PATH: /tmp/apolo-migration.sqlite3
+      APOLO_DATABASE_URL: postgresql://apolo:apolo-ci-password@localhost:5432/apolo_migration
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -63,8 +64,30 @@ jobs:
       - name: Initialize a representative SQLite schema
         working-directory: apps/api
         run: python -c "import app.main"
+      - name: Seed representative relational data
+        run: |
+          python - <<'PY'
+          import os, sqlite3
+          conn = sqlite3.connect(os.environ["APOLO_DB_PATH"])
+          conn.execute("INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
+                       ("user-ci", "migration@example.test", "test-hash", "2026-01-01T00:00:00+00:00"))
+          conn.execute("INSERT INTO workspaces(id,name,created_at) VALUES(?,?,?)",
+                       ("workspace-ci", "Migration test", "2026-01-01T00:00:00+00:00"))
+          conn.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created_at) VALUES(?,?,?,?)",
+                       ("workspace-ci", "user-ci", "owner", "2026-01-01T00:00:00+00:00"))
+          conn.commit()
+          conn.close()
+          PY
       - name: Migrate SQLite schema and data to PostgreSQL
-        run: python scripts/migrate_sqlite_to_postgres.py --sqlite /tmp/apolo-migration.sqlite3 --database-url postgresql://apolo:apolo-ci-password@localhost:5432/apolo_migration
+        run: python scripts/migrate_sqlite_to_postgres.py --sqlite /tmp/apolo-migration.sqlite3 --database-url "$APOLO_DATABASE_URL"
+      - name: Verify migrated records on PostgreSQL
+        run: |
+          python - <<'PY'
+          import os, psycopg
+          with psycopg.connect(os.environ["APOLO_DATABASE_URL"]) as conn:
+              assert conn.execute("SELECT email FROM users WHERE id='user-ci'").fetchone()[0] == "migration@example.test"
+              assert conn.execute("SELECT role FROM workspace_members WHERE workspace_id='workspace-ci'").fetchone()[0] == "owner"
+          PY
 
   mcp-server:
     runs-on: ubuntu-latest
