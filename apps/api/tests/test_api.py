@@ -639,3 +639,47 @@ def test_webhook_delivery_is_durable_and_retry_worker_retries(monkeypatch):
                            (delivery_id,)).fetchone()
     assert row["attempts"] == 2 and row["delivered_at"] is not None
     assert row["next_attempt_at"] is None
+
+
+def test_mcp_oauth_refresh_rotates_access_and_refresh_tokens(monkeypatch):
+    from cryptography.fernet import Fernet
+    from datetime import timedelta
+    from app.main import _db, _mcp_encrypt_secret, _mcp_effective_access_token, _now
+    import asyncio
+    monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    workspace = workspace_headers()["X-Workspace-ID"]
+    server_id = str(uuid.uuid4())
+    with _db() as conn:
+        conn.execute("""INSERT INTO mcp_servers(id,workspace_id,name,transport,endpoint,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?)""", (server_id, workspace, "Refresh OAuth", "streamable-http",
+            "https://oauth-mcp.example.test/mcp", _now(), _now()))
+        conn.execute("""INSERT INTO mcp_oauth_credentials(server_id,workspace_id,issuer,access_ciphertext,
+            refresh_ciphertext,expires_at,scope,updated_at,token_endpoint,client_id,resource)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (server_id, workspace, "https://issuer.example.test",
+            _mcp_encrypt_secret("old-access"), _mcp_encrypt_secret("old-refresh"),
+            (datetime.now(timezone.utc)-timedelta(seconds=5)).isoformat(), "tools:read", _now(),
+            "https://issuer.example.test/token", "apolo-public-client", "https://oauth-mcp.example.test/mcp"))
+    class TokenResponse:
+        status_code = 200
+        def json(self):
+            return {"access_token": "new-access", "refresh_token": "rotated-refresh", "expires_in": 3600}
+    class FakeClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def post(self, url, data, headers):
+            assert data["grant_type"] == "refresh_token"
+            assert data["refresh_token"] == "old-refresh"
+            assert data["client_id"] == "apolo-public-client"
+            assert data["resource"] == "https://oauth-mcp.example.test/mcp"
+            return TokenResponse()
+    monkeypatch.setattr("app.main.httpx.AsyncClient", FakeClient)
+    token = asyncio.run(_mcp_effective_access_token(server_id, workspace, None))
+    assert token == "new-access"
+    with _db() as conn:
+        row = conn.execute("SELECT access_ciphertext,refresh_ciphertext,expires_at FROM mcp_oauth_credentials WHERE server_id=?",
+                           (server_id,)).fetchone()
+    from app.main import _mcp_decrypt_secret
+    assert _mcp_decrypt_secret(row["access_ciphertext"]) == "new-access"
+    assert _mcp_decrypt_secret(row["refresh_ciphertext"]) == "rotated-refresh"
+    assert row["expires_at"] is not None and row["expires_at"] > _now()
