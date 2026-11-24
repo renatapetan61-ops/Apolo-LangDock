@@ -11,6 +11,15 @@ services:
     volumes:
       - apolo_data:/data
     restart: unless-stopped
+  mcp:
+    build:
+      context: ./apps/mcp-server
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8765
+    ports:
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped
   web:
     build:
       context: ./apps/web
