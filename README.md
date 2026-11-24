@@ -9,7 +9,7 @@ An independent, open-source AI workspace inspired by the capabilities the projec
 - Agent definitions and tool execution with explicit permission boundaries.
 - Visual workflow authoring and execution.
 - MCP client/server integration.
-- OpenAI-compatible REST API.
+- OpenAI-compatible REST API with workspace-scoped API keys and per-key rate limits.
 - Admin controls, usage accounting, and provider quota visibility.
 - Self-hostable deployment with no APOLO subscription or paid feature tiers.
 
