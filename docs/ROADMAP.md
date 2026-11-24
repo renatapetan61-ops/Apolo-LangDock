@@ -57,7 +57,9 @@
 
 ## Milestone 6 — Production readiness
 - [x] API key scope, expiry, revocation, and per-key rate-limit tests
-- [ ] Automated dependency scanning and independent security review
+- [x] Dependabot weekly updates for Python, npm, and GitHub Actions dependencies
+- [x] CI security workflow for pip-audit, npm audit, and Gitleaks secret scanning
+- [ ] Independent security review, remediation of scanner findings, and runtime penetration tests
 - [x] Provider usage metering for upstream-reported prompt/completion/total tokens and latency (non-streaming chat)
 - [x] Workspace monthly request/token quotas with owner/admin configuration and audit events
 - [x] Workspace usage summary and event history API; provider cost remains null unless upstream reports it
