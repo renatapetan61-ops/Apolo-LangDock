@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 APP_VERSION = "0.3.0"
 app = FastAPI(title="APOLO LangDock API", version=APP_VERSION, description="Open AI workspace API. Provider quotas and pricing are controlled by upstream providers.")
 origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if item.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization", "X-Workspace-ID"])
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization", "X-Workspace-ID", "X-API-Key"])
 
 PROVIDER_INFO = {
     "openrouter": ("OpenRouter", "Selected free routes; quotas and availability vary."),
@@ -502,7 +502,7 @@ from fastapi.responses import JSONResponse
 @app.middleware("http")
 async def enforce_identity_and_workspace(request: Request, call_next):
     path = request.url.path
-    public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models"}
+    public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models", "/api/v1/public/models", "/api/v1/public/chat/completions"}
     if path.startswith("/api/v1/") and not public and request.method != "OPTIONS":
         auth = request.headers.get("authorization", "")
         if not auth.lower().startswith("bearer "):
@@ -515,7 +515,7 @@ async def enforce_identity_and_workspace(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Session invalid or expired."})
         request.state.user_id = row["id"]
         scoped = (path.startswith("/api/v1/conversations") or path.startswith("/api/v1/agents")
-                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/"))
+                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/") or path.startswith("/api/v1/api-keys") or path.startswith("/api/v1/audit-logs"))
         if scoped:
             workspace_id = request.headers.get("x-workspace-id", "").strip()
             if not workspace_id:
@@ -959,3 +959,133 @@ async def delete_mcp_server_credentials(server_id: str, request: Request):
     if not result.rowcount:
         raise HTTPException(status_code=404, detail="MCP server not found.")
     return {"server_id": server_id, "credential_configured": False}
+
+
+# Workspace API keys, usage throttling, and audit trail.
+with _db() as conn:
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS api_keys(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
+      key_hash TEXT UNIQUE NOT NULL, key_prefix TEXT NOT NULL, scopes TEXT NOT NULL,
+      expires_at TEXT, revoked_at TEXT, created_at TEXT NOT NULL, last_used_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS api_key_requests(
+      id TEXT PRIMARY KEY, key_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+      route TEXT NOT NULL, model TEXT, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_key_requests_window ON api_key_requests(key_id,created_at);
+    CREATE TABLE IF NOT EXISTS audit_logs(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, actor_user_id TEXT,
+      action TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT,
+      details TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace ON audit_logs(workspace_id,created_at);
+    """)
+
+
+def _audit(workspace_id: str, actor_user_id: str | None, action: str,
+           resource_type: str, resource_id: str | None = None, details: dict | None = None):
+    with _db() as conn:
+        conn.execute("INSERT INTO audit_logs(id,workspace_id,actor_user_id,action,resource_type,resource_id,details,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                     (str(uuid.uuid4()), workspace_id, actor_user_id, action, resource_type,
+                      resource_id, _json.dumps(details or {})[:4000], _now()))
+
+
+@app.post("/api/v1/api-keys")
+async def create_api_key(payload: dict = Body(default={}), request: Request = None):
+    name = str(payload.get("name") or "").strip()
+    if not name or len(name) > 100:
+        raise HTTPException(status_code=422, detail="API key name is required (max 100 characters).")
+    scopes = payload.get("scopes", ["chat:completions", "models:read"])
+    allowed_scopes = {"chat:completions", "models:read"}
+    if not isinstance(scopes, list) or not scopes or len(scopes) > 2 or len(set(scopes)) != len(scopes) or any(scope not in allowed_scopes for scope in scopes):
+        raise HTTPException(status_code=422, detail="Scopes must be selected from chat:completions and models:read.")
+    expires_in_days = payload.get("expires_in_days", 90)
+    if not isinstance(expires_in_days, int) or not 1 <= expires_in_days <= 365:
+        raise HTTPException(status_code=422, detail="expires_in_days must be between 1 and 365.")
+    raw = "apolo_sk_" + _secrets.token_urlsafe(32)
+    key_id, now = str(uuid.uuid4()), _now()
+    expires = (datetime.now(timezone.utc) + __import__("datetime").timedelta(days=expires_in_days)).isoformat()
+    with _db() as conn:
+        conn.execute("INSERT INTO api_keys(id,workspace_id,name,key_hash,key_prefix,scopes,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                     (key_id, request.state.workspace_id, name, _token_hash(raw), raw[:16],
+                      _json.dumps(scopes), expires, now))
+    _audit(request.state.workspace_id, request.state.user_id, "api_key.created", "api_key", key_id, {"name": name, "scopes": scopes, "expires_at": expires})
+    return {"id": key_id, "name": name, "api_key": raw, "key_prefix": raw[:16],
+            "scopes": scopes, "expires_at": expires, "warning": "Copy this key now. It cannot be displayed again."}
+
+
+@app.get("/api/v1/api-keys")
+async def list_api_keys(request: Request):
+    with _db() as conn:
+        rows = conn.execute("SELECT id,name,key_prefix,scopes,expires_at,revoked_at,created_at,last_used_at FROM api_keys WHERE workspace_id=? ORDER BY created_at DESC",
+                            (request.state.workspace_id,)).fetchall()
+    return {"api_keys": [{**dict(row), "scopes": _json.loads(row["scopes"])} for row in rows]}
+
+
+@app.delete("/api/v1/api-keys/{key_id}")
+async def revoke_api_key(key_id: str, request: Request):
+    now = _now()
+    with _db() as conn:
+        result = conn.execute("UPDATE api_keys SET revoked_at=? WHERE id=? AND workspace_id=? AND revoked_at IS NULL",
+                              (now, key_id, request.state.workspace_id))
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Active API key not found.")
+    _audit(request.state.workspace_id, request.state.user_id, "api_key.revoked", "api_key", key_id)
+    return {"revoked": True, "id": key_id}
+
+
+def _authenticate_api_key(request: Request, required_scope: str) -> dict:
+    raw = request.headers.get("x-api-key", "").strip()
+    if not raw:
+        raise HTTPException(status_code=401, detail="X-API-Key is required.")
+    now = _now()
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM api_keys WHERE key_hash=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)",
+                           (_token_hash(raw), now)).fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="API key is invalid, revoked, or expired.")
+    scopes = _json.loads(row["scopes"])
+    if required_scope not in scopes:
+        raise HTTPException(status_code=403, detail="API key does not include the required scope.")
+    try:
+        rpm = int(os.getenv("APOLO_API_KEY_RPM", "60"))
+    except ValueError:
+        rpm = 60
+    rpm = min(max(rpm, 1), 600)
+    cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(minutes=1)).isoformat()
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        count = conn.execute("SELECT COUNT(*) FROM api_key_requests WHERE key_id=? AND created_at>=?",
+                             (row["id"], cutoff)).fetchone()[0]
+        if count >= rpm:
+            raise HTTPException(status_code=429, detail="API key request limit reached. Retry in 60 seconds.")
+        conn.execute("INSERT INTO api_key_requests(id,key_id,workspace_id,route,created_at) VALUES(?,?,?,?,?)",
+                     (str(uuid.uuid4()), row["id"], row["workspace_id"], request.url.path, now))
+        conn.execute("UPDATE api_keys SET last_used_at=? WHERE id=?", (now, row["id"]))
+    request.state.workspace_id = row["workspace_id"]
+    request.state.api_key_id = row["id"]
+    return dict(row)
+
+
+@app.get("/api/v1/public/models")
+async def public_models(request: Request):
+    _authenticate_api_key(request, "models:read")
+    return await models()
+
+
+@app.post("/api/v1/public/chat/completions")
+async def public_chat_completions(payload: ChatRequest, request: Request):
+    key = _authenticate_api_key(request, "chat:completions")
+    result = await chat_completions(payload, request)
+    _audit(key["workspace_id"], None, "api_key.chat", "model", payload.model,
+           {"api_key_id": key["id"], "message_count": len(payload.messages)})
+    return result
+
+
+@app.get("/api/v1/audit-logs")
+async def list_audit_logs(request: Request):
+    with _db() as conn:
+        rows = conn.execute("SELECT id,actor_user_id,action,resource_type,resource_id,details,created_at FROM audit_logs WHERE workspace_id=? ORDER BY created_at DESC LIMIT 100",
+                            (request.state.workspace_id,)).fetchall()
+    return {"events": [{**dict(row), "details": _json.loads(row["details"])} for row in rows]}
