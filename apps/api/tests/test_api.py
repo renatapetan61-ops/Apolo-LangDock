@@ -643,7 +643,7 @@ def test_webhook_delivery_is_durable_and_retry_worker_retries(monkeypatch):
 
 def test_mcp_oauth_refresh_rotates_access_and_refresh_tokens(monkeypatch):
     from cryptography.fernet import Fernet
-    from datetime import timedelta
+    from datetime import datetime, timedelta, timezone
     from app.main import _db, _mcp_encrypt_secret, _mcp_effective_access_token, _now
     import asyncio
     monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", Fernet.generate_key().decode())
