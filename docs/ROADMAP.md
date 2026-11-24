@@ -68,7 +68,7 @@
 - [x] Workspace monthly request/token quotas with owner/admin configuration and audit events
 - [x] Workspace usage summary and event history API; provider cost remains null unless upstream reports it
 - [x] API-key-specific monthly token/request quotas and usage summary endpoint
-- [ ] Streaming usage metering and durable API-key usage accounting
+- [x] Streaming token usage capture (OpenAI-compatible, Anthropic, Gemini), latency/status recording, and API-key attribution/quotas
 - [ ] Provider usage metering, quotas, and cost guardrails
 - [ ] Deployment guides and observability
 - [ ] Accessibility, localization, and mobile-responsive QA
