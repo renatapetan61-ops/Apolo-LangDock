@@ -1503,33 +1503,80 @@ async def _emit_webhook_event(workspace_id: str, event_type: str, payload: dict)
 
 async def _deliver_webhook(webhook_id: str, workspace_id: str, event_type: str, payload: dict) -> dict:
     with _db() as conn:
-        row = conn.execute("SELECT * FROM webhook_endpoints WHERE id=? AND workspace_id=? AND active=1",
-                           (webhook_id, workspace_id)).fetchone()
-    if not row or event_type not in _json.loads(row["events"]):
+        endpoint = conn.execute("SELECT * FROM webhook_endpoints WHERE id=? AND workspace_id=? AND active=1",
+                                (webhook_id, workspace_id)).fetchone()
+    if not endpoint or event_type not in _json.loads(endpoint["events"]):
         return {"skipped": True}
     delivery_id, now = str(uuid.uuid4()), _now()
     envelope = {"id": delivery_id, "type": event_type, "created_at": now, "data": payload}
     body = _json.dumps(envelope, separators=(",", ":"), sort_keys=True)
-    secret = _mcp_decrypt_secret(row["secret_ciphertext"])
-    signature = _hashlib.sha256(body.encode()).hexdigest()
+    # Persist before network I/O: a process crash cannot erase the delivery intent.
+    with _db() as conn:
+        conn.execute("""INSERT INTO webhook_deliveries(id,workspace_id,webhook_id,event_type,payload,
+            attempts,next_attempt_at,created_at) VALUES(?,?,?,?,?,0,?,?)""",
+            (delivery_id, workspace_id, webhook_id, event_type, body, now, now))
+    return await _attempt_webhook_delivery(delivery_id)
+
+
+async def _attempt_webhook_delivery(delivery_id: str) -> dict:
+    with _db() as conn:
+        delivery = conn.execute("SELECT * FROM webhook_deliveries WHERE id=?", (delivery_id,)).fetchone()
+        if not delivery or delivery["delivered_at"] or delivery["attempts"] >= 8:
+            return {"id": delivery_id, "skipped": True}
+        endpoint = conn.execute("SELECT * FROM webhook_endpoints WHERE id=? AND workspace_id=? AND active=1",
+                                (delivery["webhook_id"], delivery["workspace_id"])).fetchone()
+    if not endpoint:
+        with _db() as conn:
+            conn.execute("UPDATE webhook_deliveries SET next_attempt_at=NULL,response_excerpt=? WHERE id=?",
+                         ("endpoint_inactive_or_deleted", delivery_id))
+        return {"id": delivery_id, "delivered": False, "dead_lettered": True}
+    body = delivery["payload"]
+    secret = _mcp_decrypt_secret(endpoint["secret_ciphertext"])
     signed = _hmac.new(secret.encode(), body.encode(), _hashlib.sha256).hexdigest()
     status, excerpt, delivered = None, None, None
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            response = await client.post(row["url"], content=body,
-                headers={"Content-Type": "application/json", "X-APOLO-Event": event_type,
+            response = await client.post(endpoint["url"], content=body,
+                headers={"Content-Type": "application/json", "X-APOLO-Event": delivery["event_type"],
                          "X-APOLO-Delivery": delivery_id, "X-APOLO-Signature": "sha256=" + signed})
         status, excerpt = response.status_code, response.text[:1000]
         if 200 <= status < 300:
             delivered = _now()
+        else:
+            excerpt = "http_" + str(status) + ": " + excerpt
     except httpx.HTTPError as exc:
         excerpt = type(exc).__name__
+    attempts = delivery["attempts"] + 1
+    # Exponential retry: 30s, 60s, 120s ... capped at 6h; eight attempts total.
+    next_attempt = None
+    if not delivered and attempts < 8:
+        from datetime import timedelta
+        next_attempt = (datetime.now(timezone.utc) + timedelta(seconds=min(30 * (2 ** (attempts - 1)), 21600))).isoformat()
     with _db() as conn:
-        conn.execute("""INSERT INTO webhook_deliveries(id,workspace_id,webhook_id,event_type,payload,status_code,
-            response_excerpt,attempts,next_attempt_at,delivered_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (delivery_id, workspace_id, webhook_id, event_type, body, status, excerpt, 1,
-             None if delivered else _now(), delivered, now))
-    return {"id": delivery_id, "status_code": status, "delivered": bool(delivered)}
+        conn.execute("""UPDATE webhook_deliveries SET status_code=?,response_excerpt=?,attempts=?,
+            next_attempt_at=?,delivered_at=? WHERE id=?""",
+            (status, excerpt, attempts, next_attempt, delivered, delivery_id))
+    return {"id": delivery_id, "status_code": status, "delivered": bool(delivered),
+            "attempts": attempts, "next_attempt_at": next_attempt, "dead_lettered": not delivered and next_attempt is None}
+
+
+@app.post("/internal/webhooks/dispatch")
+async def dispatch_webhook_queue(request: Request, limit: int = 25):
+    worker_token = os.getenv("APOLO_WEBHOOK_WORKER_TOKEN", "")
+    supplied = request.headers.get("X-APOLO-Worker-Token", "")
+    if not worker_token or not _secrets.compare_digest(worker_token, supplied):
+        raise HTTPException(status_code=401, detail="Webhook worker authentication required.")
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100.")
+    now = _now()
+    with _db() as conn:
+        rows = conn.execute("""SELECT id FROM webhook_deliveries WHERE delivered_at IS NULL
+            AND next_attempt_at IS NOT NULL AND next_attempt_at<=? AND attempts<8
+            ORDER BY next_attempt_at ASC LIMIT ?""", (now, limit)).fetchall()
+    results = []
+    for row in rows:
+        results.append(await _attempt_webhook_delivery(row["id"]))
+    return {"processed": len(results), "results": results}
 
 
 @app.post("/api/v1/webhooks/{webhook_id}/test")
