@@ -29,7 +29,7 @@ APOLO LangDock software is intended to be free and open source. Model inference 
 
 ## Development status
 
-This repository is being initialized. The first milestone is a runnable foundation with health checks, provider configuration, and a basic chat interface. Agents, workflows, MCP, persistence, authentication, and production hardening will be delivered incrementally and validated by CI.
+The repository now includes multi-provider chat, persistent workspace data, bearer authentication, agent and workflow execution foundations, and an initial MCP client/server integration. Production hardening, provider validation, OAuth credentials, quotas, and deployment review remain in progress.
 
 ## Quick start
 
