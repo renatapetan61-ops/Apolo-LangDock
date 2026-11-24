@@ -535,3 +535,109 @@ async def logout(user: dict = Depends(_current_user), credentials: HTTPAuthoriza
         with _db() as conn:
             conn.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(credentials.credentials),))
     return {"logged_out": True}
+
+
+# Bounded agent execution. Tool metadata is never executed by this runtime.
+with _db() as conn:
+    conn.execute("""CREATE TABLE IF NOT EXISTS agent_runs(
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, agent_ids TEXT NOT NULL,
+        prompt TEXT NOT NULL, status TEXT NOT NULL, output TEXT NOT NULL DEFAULT '',
+        trace TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
+    )""")
+
+@app.post("/api/v1/agents/{agent_id}/run")
+async def run_agent(agent_id: str, payload: dict = Body(...), request: Request = None):
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 20000:
+        raise HTTPException(status_code=422, detail="A prompt of 1-20000 characters is required.")
+    with _db() as conn:
+        agent = conn.execute("SELECT * FROM agents WHERE id=? AND workspace_id=?",
+                             (agent_id, request.state.workspace_id)).fetchone()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    if _json.loads(agent["tools"]):
+        raise HTTPException(status_code=409, detail="This agent declares tools, but tool execution is disabled until explicit allowlists and approval gates are configured.")
+    if not agent["model"]:
+        raise HTTPException(status_code=422, detail="Choose a model for this agent before running it.")
+    run_id, created = str(uuid.uuid4()), _now()
+    trace = [{"step": 1, "agent_id": agent_id, "model": agent["model"], "status": "running"}]
+    try:
+        response = await chat_completions(ChatRequest(model=agent["model"], messages=[
+            ChatMessage(role="system", content=agent["instructions"] or "You are a helpful assistant."),
+            ChatMessage(role="user", content=prompt)
+        ]), request)
+        output = response["choices"][0]["message"]["content"]
+        trace[0]["status"] = "completed"
+        with _db() as conn:
+            conn.execute("INSERT INTO agent_runs(id,workspace_id,agent_ids,prompt,status,output,trace,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (run_id, request.state.workspace_id, _json.dumps([agent_id]), prompt, "completed", output, _json.dumps(trace), created))
+        return {"run_id": run_id, "status": "completed", "output": output, "trace": trace}
+    except Exception as exc:
+        trace[0]["status"] = "failed"
+        with _db() as conn:
+            conn.execute("INSERT INTO agent_runs(id,workspace_id,agent_ids,prompt,status,output,trace,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (run_id, request.state.workspace_id, _json.dumps([agent_id]), prompt, "failed", "", _json.dumps(trace), created))
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=502, detail="Agent execution failed.") from exc
+
+
+@app.post("/api/v1/agents/orchestrate")
+async def orchestrate_agents(payload: dict = Body(...), request: Request = None):
+    agent_ids = payload.get("agent_ids")
+    prompt = payload.get("prompt")
+    max_steps = payload.get("max_steps", 3)
+    if not isinstance(agent_ids, list) or not 1 <= len(agent_ids) <= 5 or len(set(agent_ids)) != len(agent_ids):
+        raise HTTPException(status_code=422, detail="agent_ids must contain 1-5 unique agent IDs.")
+    if not isinstance(max_steps, int) or not 1 <= max_steps <= 5:
+        raise HTTPException(status_code=422, detail="max_steps must be between 1 and 5.")
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 20000:
+        raise HTTPException(status_code=422, detail="A prompt of 1-20000 characters is required.")
+    with _db() as conn:
+        placeholders = ",".join("?" for _ in agent_ids)
+        rows = conn.execute("SELECT * FROM agents WHERE workspace_id=? AND id IN (" + placeholders + ")",
+                            [request.state.workspace_id, *agent_ids]).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    if len(by_id) != len(agent_ids):
+        raise HTTPException(status_code=404, detail="One or more agents were not found in this workspace.")
+    selected = [by_id[item] for item in agent_ids[:max_steps]]
+    if any(_json.loads(row["tools"]) for row in selected):
+        raise HTTPException(status_code=409, detail="Orchestration with declared tools is disabled until explicit allowlists and approval gates are configured.")
+    if any(not row["model"] for row in selected):
+        raise HTTPException(status_code=422, detail="Every selected agent must have a model.")
+    run_id, created = str(uuid.uuid4()), _now()
+    trace, previous = [], ""
+    try:
+        for index, agent in enumerate(selected, start=1):
+            step_prompt = prompt if index == 1 else (
+                "Original task:\n" + prompt + "\n\nPrevious agent result:\n" + previous +
+                "\n\nContinue the task. Check the prior result and provide the next useful contribution."
+            )
+            trace.append({"step": index, "agent_id": agent["id"], "model": agent["model"], "status": "running"})
+            response = await chat_completions(ChatRequest(model=agent["model"], messages=[
+                ChatMessage(role="system", content=agent["instructions"] or "You are a helpful assistant."),
+                ChatMessage(role="user", content=step_prompt)
+            ]), request)
+            previous = response["choices"][0]["message"]["content"]
+            trace[-1]["status"] = "completed"
+        with _db() as conn:
+            conn.execute("INSERT INTO agent_runs(id,workspace_id,agent_ids,prompt,status,output,trace,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (run_id, request.state.workspace_id, _json.dumps([row["id"] for row in selected]), prompt, "completed", previous, _json.dumps(trace), created))
+        return {"run_id": run_id, "status": "completed", "output": previous, "trace": trace}
+    except Exception as exc:
+        if trace:
+            trace[-1]["status"] = "failed"
+        with _db() as conn:
+            conn.execute("INSERT INTO agent_runs(id,workspace_id,agent_ids,prompt,status,output,trace,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (run_id, request.state.workspace_id, _json.dumps([row["id"] for row in selected]), prompt, "failed", previous, _json.dumps(trace), created))
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=502, detail="Agent orchestration failed.") from exc
+
+
+@app.get("/api/v1/agent-runs")
+async def list_agent_runs(request: Request):
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM agent_runs WHERE workspace_id=? ORDER BY created_at DESC LIMIT 50",
+                            (request.state.workspace_id,)).fetchall()
+    return {"runs": [{**dict(row), "agent_ids": _json.loads(row["agent_ids"]), "trace": _json.loads(row["trace"])} for row in rows]}
