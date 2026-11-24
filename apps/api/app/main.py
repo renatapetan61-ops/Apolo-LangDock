@@ -431,6 +431,12 @@ async def _meter_stream(generator, http_request: Request, model_id: str, provide
         _record_usage(http_request, model_id, provider, usage, {},
                       int((time.monotonic() - started) * 1000),
                       "succeeded" if completed else "failed")
+@app.post("/api/v1/public/chat/stream")
+async def public_chat_stream(request: ChatRequest, http_request: Request):
+    _authenticate_api_key(http_request, "chat:completions")
+    return await chat_stream(request, http_request)
+
+
 @app.post("/api/v1/chat/stream")
 async def chat_stream(request: ChatRequest, http_request: Request):
     provider, separator, model=request.model.partition("/")
@@ -545,7 +551,7 @@ from fastapi.responses import JSONResponse
 @app.middleware("http")
 async def enforce_identity_and_workspace(request: Request, call_next):
     path = request.url.path
-    public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models", "/api/v1/public/models", "/api/v1/public/chat/completions", "/api/v1/mcp/oauth/callback"}
+    public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models", "/api/v1/public/models", "/api/v1/public/chat/completions", "/api/v1/public/chat/stream", "/api/v1/mcp/oauth/callback"}
     if path.startswith("/api/v1/") and not public and request.method != "OPTIONS":
         auth = request.headers.get("authorization", "")
         if not auth.lower().startswith("bearer "):
