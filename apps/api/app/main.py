@@ -805,6 +805,7 @@ async def register_mcp_server(payload: dict = Body(...), request: Request = None
     with _db() as conn:
         conn.execute("INSERT INTO mcp_servers(id,workspace_id,name,transport,endpoint,config_key,auth_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                      (server_id, request.state.workspace_id, name, transport, endpoint, config_key, auth_ciphertext, now, now))
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.server.created", "mcp_server", server_id, {"transport": transport, "name": name})
     return {"id": server_id, "name": name, "transport": transport, "created_at": now}
 
 
@@ -817,6 +818,7 @@ async def delete_mcp_server(server_id: str, request: Request):
                               (server_id, request.state.workspace_id))
     if not result.rowcount:
         raise HTTPException(status_code=404, detail="MCP server not found.")
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.server.deleted", "mcp_server", server_id)
     return {"deleted": True, "id": server_id}
 
 
@@ -878,6 +880,7 @@ async def set_mcp_tool_approval(server_id: str, tool_name: str, payload: dict = 
                               (1 if approved else 0, request.state.workspace_id, server_id, tool_name))
     if not result.rowcount:
         raise HTTPException(status_code=404, detail="Discovered MCP tool not found.")
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.tool.approval_changed", "mcp_tool", tool_name, {"server_id": server_id, "approved": approved})
     return {"server_id": server_id, "tool_name": tool_name, "approved": approved}
 
 
@@ -906,6 +909,7 @@ async def call_approved_mcp_tool(server_id: str, tool_name: str, payload: dict =
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"MCP tool execution failed: {str(exc)[:300]}") from exc
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.tool.called", "mcp_tool", tool_name, {"server_id": server_id, "is_error": bool(result.get("is_error"))})
     return result
 
 
@@ -948,6 +952,7 @@ async def set_mcp_server_credentials(server_id: str, payload: dict = Body(...), 
         encrypted = _mcp_encrypt_secret(token.strip())
         conn.execute("UPDATE mcp_servers SET auth_ciphertext=?,updated_at=? WHERE id=? AND workspace_id=?",
                      (encrypted, _now(), server_id, request.state.workspace_id))
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.credentials.updated", "mcp_server", server_id)
     return {"server_id": server_id, "credential_configured": True}
 
 
@@ -958,6 +963,7 @@ async def delete_mcp_server_credentials(server_id: str, request: Request):
                               (_now(), server_id, request.state.workspace_id))
     if not result.rowcount:
         raise HTTPException(status_code=404, detail="MCP server not found.")
+    _audit(request.state.workspace_id, request.state.user_id, "mcp.credentials.revoked", "mcp_server", server_id)
     return {"server_id": server_id, "credential_configured": False}
 
 
