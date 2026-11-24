@@ -1025,11 +1025,11 @@ with _db() as conn:
       key_id TEXT PRIMARY KEY, monthly_token_limit INTEGER, monthly_request_limit INTEGER, updated_at TEXT NOT NULL
     );
     """)
-        api_key_columns = {row[1] for row in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
-        if "monthly_token_limit" not in api_key_columns:
-            conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_token_limit INTEGER")
-        if "monthly_request_limit" not in api_key_columns:
-            conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_request_limit INTEGER")
+    api_key_columns = {row[1] for row in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+    if "monthly_token_limit" not in api_key_columns:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_token_limit INTEGER")
+    if "monthly_request_limit" not in api_key_columns:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_request_limit INTEGER")
 
 
 def _audit(workspace_id: str, actor_user_id: str | None, action: str,
