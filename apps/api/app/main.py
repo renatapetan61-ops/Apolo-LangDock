@@ -239,7 +239,7 @@ async def list_messages(conversation_id: str, request: Request):
     with _db() as conn:
         exists = conn.execute("SELECT 1 FROM conversations WHERE id=? AND workspace_id=?", (conversation_id,request.state.workspace_id)).fetchone()
         if not exists: raise HTTPException(status_code=404, detail="Conversation not found.")
-        rows = conn.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at", (conversation_id,request.state.workspace_id)).fetchall()
+        rows = conn.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at", (conversation_id,)).fetchall()
     return {"messages":[dict(row) for row in rows]}
 
 @app.post("/api/v1/conversations/{conversation_id}/messages")
@@ -249,7 +249,7 @@ async def add_message(conversation_id: str, payload: dict = Body(...), request: 
         raise HTTPException(status_code=422, detail="A valid role and non-empty content are required.")
     message_id, now = str(uuid.uuid4()), _now()
     with _db() as conn:
-        exists = conn.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+        exists = conn.execute("SELECT 1 FROM conversations WHERE id=? AND workspace_id=?", (conversation_id,request.state.workspace_id)).fetchone()
         if not exists: raise HTTPException(status_code=404, detail="Conversation not found.")
         conn.execute("INSERT INTO messages(id,conversation_id,role,content,created_at) VALUES(?,?,?,?,?)",
                      (message_id,conversation_id,role,content,now))
@@ -260,7 +260,7 @@ async def add_message(conversation_id: str, payload: dict = Body(...), request: 
 async def delete_conversation(conversation_id: str, request: Request):
     with _db() as conn:
         conn.execute("PRAGMA foreign_keys=ON")
-        result = conn.execute("DELETE FROM conversations WHERE id=? AND workspace_id=?", (conversation_id,))
+        result = conn.execute("DELETE FROM conversations WHERE id=? AND workspace_id=?", (conversation_id,request.state.workspace_id))
         if not result.rowcount: raise HTTPException(status_code=404, detail="Conversation not found.")
         conn.execute("DELETE FROM messages WHERE conversation_id=?", (conversation_id,))
     return {"deleted":True,"id":conversation_id}
