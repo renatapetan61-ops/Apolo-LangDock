@@ -786,7 +786,7 @@ async def list_mcp_servers(request: Request):
     with _db() as conn:
         rows = conn.execute("SELECT * FROM mcp_servers WHERE workspace_id=? ORDER BY created_at DESC",
                             (request.state.workspace_id,)).fetchall()
-    return {"servers": [{**{key: row[key] for key in ("id","workspace_id","name","transport","endpoint","config_key","created_at","updated_at")}, "credential_configured": bool(row["auth_ciphertext"])} for row in rows]}
+    return {"servers": [{**{key: row[key] for key in ("id","workspace_id","name","transport","endpoint","config_key","created_at","updated_at","auth_mode")}, "credential_configured": bool(row["auth_ciphertext"]), "oauth_connected": row["auth_mode"] == "oauth"} for row in rows]}
 
 
 @app.post("/api/v1/mcp/servers")
