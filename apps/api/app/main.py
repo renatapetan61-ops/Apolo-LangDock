@@ -58,7 +58,8 @@ OPENAI_COMPATIBLE_BASES = {
 }
 
 def _compatible_base(provider: str) -> str:
-    return os.getenv(provider.upper() + "_BASE_URL", OPENAI_COMPATIBLE_BASES[provider]).rstrip("/")
+    override = os.getenv(provider.upper() + "_BASE_URL", "").strip()
+    return (override or OPENAI_COMPATIBLE_BASES[provider]).rstrip("/")
 def _configured(provider: str) -> bool:
     return bool(_key(provider)) if provider != "ollama" else True
 
