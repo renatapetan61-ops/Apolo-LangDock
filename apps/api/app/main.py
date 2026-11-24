@@ -1254,7 +1254,7 @@ async def list_workspace_members(request: Request):
 async def add_workspace_member(payload: dict = Body(...), request: Request = None):
     target_user_id = payload.get("user_id")
     role = payload.get("role", "member")
-    if not isinstance(target_user_id, str) or not target_user_id or role not in {"admin", "member"}:
+    if not isinstance(target_user_id, str) or not target_user_id or not isinstance(role, str) or role not in {"admin", "member"}:
         raise HTTPException(status_code=422, detail="An existing user_id and role admin/member are required.")
     with _db() as conn:
         actor = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
@@ -1279,7 +1279,7 @@ async def add_workspace_member(payload: dict = Body(...), request: Request = Non
 @app.patch("/api/v1/workspace/members/{target_user_id}")
 async def change_workspace_member_role(target_user_id: str, payload: dict = Body(...), request: Request = None):
     role = payload.get("role")
-    if role not in {"admin", "member"}:
+    if not isinstance(role, str) or role not in {"admin", "member"}:
         raise HTTPException(status_code=422, detail="Role must be admin or member.")
     with _db() as conn:
         actor = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
