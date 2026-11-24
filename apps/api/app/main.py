@@ -848,7 +848,7 @@ async def discover_mcp_server_tools(server_id: str, request: Request):
     try:
         found = await asyncio.wait_for(
             _mcp_discover_tools(server["transport"], server["endpoint"], server["config_key"],
-                                _mcp_effective_access_token(server_id, request.state.workspace_id, server["auth_ciphertext"])), timeout=25
+                                await _mcp_effective_access_token(server_id, request.state.workspace_id, server["auth_ciphertext"])), timeout=25
         )
     except HTTPException:
         raise
@@ -918,7 +918,7 @@ async def call_approved_mcp_tool(server_id: str, tool_name: str, payload: dict =
         raise HTTPException(status_code=403, detail="This MCP tool has not been approved by the workspace.")
     try:
         result = await asyncio.wait_for(
-            _mcp_invoke_tool(row["transport"], tool_name, arguments, row["endpoint"], row["config_key"], _mcp_effective_access_token(server_id, request.state.workspace_id, row["auth_ciphertext"])),
+            _mcp_invoke_tool(row["transport"], tool_name, arguments, row["endpoint"], row["config_key"], await _mcp_effective_access_token(server_id, request.state.workspace_id, row["auth_ciphertext"])),
             timeout=30
         )
     except asyncio.TimeoutError as exc:
@@ -954,15 +954,48 @@ def _mcp_decrypt_secret(ciphertext: str | None) -> str | None:
     except InvalidToken as exc:
         raise HTTPException(status_code=500, detail="Stored MCP credential cannot be decrypted; verify the encryption key.") from exc
 
-def _mcp_effective_access_token(server_id: str, workspace_id: str, bearer_ciphertext: str | None) -> str | None:
+async def _mcp_effective_access_token(server_id: str, workspace_id: str, bearer_ciphertext: str | None) -> str | None:
     with _db() as conn:
-        oauth = conn.execute("SELECT access_ciphertext,expires_at FROM mcp_oauth_credentials WHERE server_id=? AND workspace_id=?",
+        oauth = conn.execute("SELECT * FROM mcp_oauth_credentials WHERE server_id=? AND workspace_id=?",
                              (server_id, workspace_id)).fetchone()
-    if oauth:
-        if oauth["expires_at"] and oauth["expires_at"] <= _now():
-            raise HTTPException(status_code=401, detail="MCP OAuth access token expired. Reconnect this server; refresh-token rotation is not yet enabled.")
-        return _mcp_decrypt_secret(oauth["access_ciphertext"])
-    return _mcp_decrypt_secret(bearer_ciphertext)
+    if not oauth:
+        return _mcp_decrypt_secret(bearer_ciphertext)
+    expires_at = oauth["expires_at"]
+    should_refresh = bool(expires_at and expires_at <=
+        (datetime.now(timezone.utc) + __import__("datetime").timedelta(seconds=60)).isoformat())
+    if should_refresh:
+        refresh = _mcp_decrypt_secret(oauth["refresh_ciphertext"])
+        if not refresh or not oauth["token_endpoint"] or not oauth["client_id"]:
+            raise HTTPException(status_code=401, detail="MCP OAuth token expired and no usable refresh token is available. Reconnect this server.")
+        form = {"grant_type": "refresh_token", "refresh_token": refresh, "client_id": oauth["client_id"]}
+        if oauth["resource"]:
+            form["resource"] = oauth["resource"]
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+                response = await client.post(oauth["token_endpoint"], data=form,
+                                             headers={"Accept": "application/json"})
+            if response.status_code != 200:
+                raise HTTPException(status_code=401, detail="MCP OAuth refresh was rejected. Reconnect this server.")
+            token_data = response.json()
+        except HTTPException:
+            raise
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail="MCP OAuth refresh endpoint could not be reached or returned invalid JSON.") from exc
+        access = token_data.get("access_token") if isinstance(token_data, dict) else None
+        rotated_refresh = token_data.get("refresh_token", refresh) if isinstance(token_data, dict) else refresh
+        if not isinstance(access, str) or not access or len(access) > 16384 or not isinstance(rotated_refresh, str) or len(rotated_refresh) > 16384:
+            raise HTTPException(status_code=502, detail="MCP OAuth refresh response did not contain valid tokens.")
+        expires_in = token_data.get("expires_in")
+        expiry = None
+        if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0:
+            expiry = (datetime.now(timezone.utc) + __import__("datetime").timedelta(seconds=min(int(expires_in), 31536000))).isoformat()
+        with _db() as conn:
+            conn.execute("""UPDATE mcp_oauth_credentials SET access_ciphertext=?,refresh_ciphertext=?,
+                expires_at=?,scope=COALESCE(?,scope),updated_at=? WHERE server_id=? AND workspace_id=?""",
+                (_mcp_encrypt_secret(access), _mcp_encrypt_secret(rotated_refresh), expiry,
+                 token_data.get("scope"), _now(), server_id, workspace_id))
+        return access
+    return _mcp_decrypt_secret(oauth["access_ciphertext"])
 
 
 
@@ -1061,6 +1094,12 @@ with _db() as conn:
     mcp_columns = {row[1] for row in conn.execute("PRAGMA table_info(mcp_servers)").fetchall()}
     if "auth_mode" not in mcp_columns:
         conn.execute("ALTER TABLE mcp_servers ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'bearer'")
+    oauth_columns = {row[1] for row in conn.execute("PRAGMA table_info(mcp_oauth_credentials)").fetchall()}
+    for column, definition in {
+        "token_endpoint": "TEXT", "client_id": "TEXT", "resource": "TEXT"
+    }.items():
+        if column not in oauth_columns:
+            conn.execute(f"ALTER TABLE mcp_oauth_credentials ADD COLUMN {column} {definition}")
 
 
 def _audit(workspace_id: str, actor_user_id: str | None, action: str,
@@ -1753,12 +1792,14 @@ async def mcp_oauth_callback(code: str | None = None, state: str | None = None,
         conn.execute("UPDATE mcp_servers SET auth_mode='oauth',updated_at=? WHERE id=? AND workspace_id=?",
                      (_now(), tx["server_id"], tx["workspace_id"]))
         conn.execute("""INSERT INTO mcp_oauth_credentials(server_id,workspace_id,issuer,access_ciphertext,refresh_ciphertext,
-            expires_at,scope,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET
-            workspace_id=excluded.workspace_id,issuer=excluded.issuer,access_ciphertext=excluded.access_ciphertext,
-            refresh_ciphertext=excluded.refresh_ciphertext,expires_at=excluded.expires_at,scope=excluded.scope,
-            updated_at=excluded.updated_at""",
+            expires_at,scope,updated_at,token_endpoint,client_id,resource) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(server_id) DO UPDATE SET workspace_id=excluded.workspace_id,issuer=excluded.issuer,
+            access_ciphertext=excluded.access_ciphertext,refresh_ciphertext=excluded.refresh_ciphertext,
+            expires_at=excluded.expires_at,scope=excluded.scope,updated_at=excluded.updated_at,
+            token_endpoint=excluded.token_endpoint,client_id=excluded.client_id,resource=excluded.resource""",
             (tx["server_id"], tx["workspace_id"], tx["issuer"], _mcp_encrypt_secret(access),
-             _mcp_encrypt_secret(refresh) if refresh else None, expiry, token_data.get("scope"), _now()))
+             _mcp_encrypt_secret(refresh) if refresh else None, expiry, token_data.get("scope"), _now(),
+             tx["token_endpoint"], tx["client_id"], tx["resource"]))
         conn.execute("UPDATE mcp_oauth_transactions SET consumed_at=? WHERE id=?", (_now(), tx["id"]))
     _audit(tx["workspace_id"], None, "mcp.oauth.connected", "mcp_server", tx["server_id"],
            {"issuer": tx["issuer"], "expires_at": expiry})
