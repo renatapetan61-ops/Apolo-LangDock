@@ -22,7 +22,9 @@
 - [x] Session logout and revocation endpoint
 - [x] Workspace scoping for conversations, messages, agents, workflows, and agent-run history
 - [x] Login/register and workspace selection in the web UI
-- [ ] Roles, audit log, secrets management, email verification, and rate limiting
+- [x] Scoped public API keys with one-time secret display, expiry, and revocation
+- [x] Per-key request throttling and workspace audit log foundation
+- [ ] Roles, email verification, advanced rate limiting, and secrets management for provider credentials
 - [ ] Database migrations and backups
 
 ## Milestone 3 — Agents and tools
@@ -53,8 +55,9 @@
 - [ ] Audit log, quotas, and per-tool policy scopes
 
 ## Milestone 6 — Production readiness
-- [ ] Automated tests, dependency scanning, and security review
-- [ ] Rate limits, quotas, and cost guardrails
+- [x] API key scope, expiry, revocation, and per-key rate-limit tests
+- [ ] Automated dependency scanning and independent security review
+- [ ] Provider usage metering, quotas, and cost guardrails
 - [ ] Deployment guides and observability
 - [ ] Accessibility, localization, and mobile-responsive QA
 
