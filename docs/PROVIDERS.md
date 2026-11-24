@@ -11,6 +11,10 @@ APOLO LangDock routes requests through provider adapters. Add keys only to the s
 | `openai/<model-id>` | OpenAI | `OPENAI_API_KEY` |
 | `anthropic/<model-id>` | Anthropic | `ANTHROPIC_API_KEY` |
 | `ollama/<model-id>` | Ollama | No API key by default |
+| `groq/<model-id>` | Groq | `GROQ_API_KEY` |
+| `deepseek/<model-id>` | DeepSeek | `DEEPSEEK_API_KEY` |
+| `mistral/<model-id>` | Mistral AI | `MISTRAL_API_KEY` |
+| `xai/<model-id>` | xAI | `XAI_API_KEY` |
 
 ## Free usage
 
@@ -36,4 +40,4 @@ curl http://localhost:8000/api/v1/chat/completions \
   }'
 ```
 
-The current API returns a provider-compatible chat completion for configured adapters. Streaming, dynamic model discovery, and persistent usage accounting are planned next.
+The API discovers models from configured providers and supports non-streaming and SSE chat for the OpenAI-compatible adapters, including Groq, DeepSeek, Mistral AI, and xAI. Provider-specific token usage is recorded when the upstream stream reports it; missing usage remains unknown rather than estimated. Optional `*_BASE_URL` overrides are available for the four additional adapters.
