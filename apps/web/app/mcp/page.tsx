@@ -4,14 +4,14 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000";
-type Server={id:string;name:string;transport:string;endpoint?:string;config_key?:string};
+type Server={id:string;name:string;transport:string;endpoint?:string;config_key?:string;credential_configured?:boolean};
 type Tool={name:string;description:string;input_schema:Record<string,unknown>;approved:boolean};
 
 export default function MCPPage(){
  const [token,setToken]=useState("");const [workspaceId,setWorkspaceId]=useState("");
  const [servers,setServers]=useState<Server[]>([]);const [tools,setTools]=useState<Tool[]>([]);
  const [name,setName]=useState("");const [transport,setTransport]=useState("streamable-http");
- const [endpoint,setEndpoint]=useState("");const [configKey,setConfigKey]=useState("");
+ const [endpoint,setEndpoint]=useState("");const [configKey,setConfigKey]=useState("");const [bearerToken,setBearerToken]=useState("");const [credentialInput,setCredentialInput]=useState("");
  const [selected,setSelected]=useState("");const [selectedTool,setSelectedTool]=useState("");
  const [args,setArgs]=useState("{}");const [result,setResult]=useState("");
  const [notice,setNotice]=useState("Carregando integração MCP...");const [busy,setBusy]=useState(false);
@@ -40,10 +40,10 @@ export default function MCPPage(){
  async function register(){
   if(!name.trim())return;setBusy(true);
   try{
-   const body=transport==="streamable-http"?{name,transport,endpoint}:{name,transport,config_key:configKey};
+   const body=transport==="streamable-http"?{name,transport,endpoint,...(bearerToken.trim()?{bearer_token:bearerToken.trim()}:{})}:{name,transport,config_key:configKey};
    const r=await fetch(API+"/api/v1/mcp/servers",{method:"POST",headers:headers(true),body:JSON.stringify(body)});
    const d=await r.json();if(!r.ok)throw new Error(d.detail||"Falha ao registrar servidor.");
-   setName("");setEndpoint("");setConfigKey("");setSelected(d.id);await refreshServers();setTools([]);setNotice("Servidor registrado. Faça a descoberta de ferramentas.");
+   setName("");setEndpoint("");setConfigKey("");setBearerToken("");setSelected(d.id);await refreshServers();setTools([]);setNotice("Servidor registrado. Faça a descoberta de ferramentas.");
   }catch(e){setNotice(e instanceof Error?e.message:"Falha ao registrar.");}
   finally{setBusy(false);}
  }
@@ -76,6 +76,16 @@ export default function MCPPage(){
   }catch(e){setNotice(e instanceof Error?e.message:"Falha na chamada.");}
   finally{setBusy(false);}
  }
+ async function saveCredential(){
+  if(!selected||!credentialInput.trim())return;setBusy(true);
+  try{const r=await fetch(API+"/api/v1/mcp/servers/"+selected+"/credentials",{method:"POST",headers:headers(true),body:JSON.stringify({bearer_token:credentialInput.trim()})});const d=await r.json();if(!r.ok)throw new Error(d.detail||"Falha ao salvar credencial.");setCredentialInput("");await refreshServers();setNotice("Credencial criptografada e salva.");}
+  catch(e){setNotice(e instanceof Error?e.message:"Falha ao salvar credencial.");}finally{setBusy(false);}
+ }
+ async function revokeCredential(){
+  if(!selected)return;setBusy(true);
+  try{const r=await fetch(API+"/api/v1/mcp/servers/"+selected+"/credentials",{method:"DELETE",headers:headers()});const d=await r.json();if(!r.ok)throw new Error(d.detail||"Falha ao remover credencial.");await refreshServers();setNotice("Credencial removida.");}
+  catch(e){setNotice(e instanceof Error?e.message:"Falha ao remover credencial.");}finally{setBusy(false);}
+ }
  async function removeServer(serverId:string){
   if(!window.confirm("Remover este servidor e suas aprovações?"))return;
   const r=await fetch(API+"/api/v1/mcp/servers/"+serverId,{method:"DELETE",headers:headers()});
@@ -90,13 +100,13 @@ export default function MCPPage(){
    <section className="card mcp-card"><h2>Adicionar servidor</h2><div className="tool-form">
     <label>Nome<input value={name} onChange={e=>setName(e.target.value)} maxLength={100}/></label>
     <label>Transporte<select value={transport} onChange={e=>setTransport(e.target.value)}><option value="streamable-http">Streamable HTTP (remoto)</option><option value="stdio">stdio (alias do administrador)</option></select></label>
-    {transport==="streamable-http"?<label>Endpoint HTTPS<input value={endpoint} onChange={e=>setEndpoint(e.target.value)} placeholder="https://servidor-autorizado.example/mcp"/></label>:<label>Alias configurado pelo administrador<input value={configKey} onChange={e=>setConfigKey(e.target.value)} placeholder="ex.: apolo-local-tools"/></label>}
+    {transport==="streamable-http"?<label>Endpoint HTTPS<input value={endpoint} onChange={e=>setEndpoint(e.target.value)} placeholder="https://servidor-autorizado.example/mcp"/></label><label>Bearer token (opcional)<input type="password" autoComplete="off" value={bearerToken} onChange={e=>setBearerToken(e.target.value)} placeholder="Token de acesso do servidor"/></label>:<label>Alias configurado pelo administrador<input value={configKey} onChange={e=>setConfigKey(e.target.value)} placeholder="ex.: apolo-local-tools"/></label>}
     <p className="note">Hosts HTTP precisam estar em MCP_ALLOWED_HOSTS. Processos stdio só podem usar aliases definidos no servidor; o navegador não envia comandos.</p>
     <button disabled={busy||!name.trim()||(transport==="streamable-http"?!endpoint.trim():!configKey.trim())} onClick={register}>Registrar servidor</button>
-   </div><h2>Servidores deste workspace</h2><div className="mcp-server-list">{servers.map(s=><div className={selected===s.id?"active":""} key={s.id}><button className="server-select" onClick={()=>{setSelected(s.id);refreshTools(s.id).catch(e=>setNotice(e.message));}}><strong>{s.name}</strong><small>{s.transport} · {s.endpoint||s.config_key}</small></button><button className="danger-link" onClick={()=>removeServer(s.id)}>Remover</button></div>)}</div></section>
+   </div><h2>Servidores deste workspace</h2><div className="mcp-server-list">{servers.map(s=><div className={selected===s.id?"active":""} key={s.id}><button className="server-select" onClick={()=>{setSelected(s.id);refreshTools(s.id).catch(e=>setNotice(e.message));}}><strong>{s.name}</strong><small>{s.transport} · {s.endpoint||s.config_key} · {s.credential_configured?"credencial configurada":"sem credencial"}</small></button><button className="danger-link" onClick={()=>removeServer(s.id)}>Remover</button></div>)}</div></section>
    <section className="card mcp-card"><div className="mcp-toolbar"><h2>Ferramentas descobertas</h2><button disabled={busy||!selected} onClick={()=>discover()}>Descobrir ferramentas</button></div>
     {!selected?<p className="note">Selecione um servidor para ver as ferramentas.</p>:!tools.length?<p className="note">Nenhuma ferramenta carregada. Execute a descoberta.</p>:<div className="mcp-tool-list">{tools.map(t=><article key={t.name} className={selectedTool===t.name?"active":""}><button className="tool-select" onClick={()=>{setSelectedTool(t.name);setArgs("{}");}}><strong>{t.name}</strong><small>{t.description||"Sem descrição"}</small></button><label className="approval"><input type="checkbox" checked={t.approved} disabled={busy} onChange={e=>approval(t,e.target.checked)}/> Aprovada</label></article>)}</div>}
-    <div className="mcp-call"><h3>Executar ferramenta aprovada</h3><p className="note">{activeTool?activeTool.description:"Selecione uma ferramenta na lista."}</p><label>Argumentos JSON<textarea rows={6} value={args} onChange={e=>setArgs(e.target.value)} spellCheck={false}/></label><button disabled={busy||!activeTool||!activeTool.approved} onClick={callTool}>Executar chamada MCP</button></div>
+    <div className="mcp-call">{servers.find(s=>s.id===selected)?.transport==="streamable-http"&&<section className="mcp-credentials"><h3>Credenciais do servidor</h3><p className="note">{servers.find(s=>s.id===selected)?.credential_configured?"Token salvo criptografado no servidor.":"Este servidor não possui bearer token salvo."}</p><label>Definir ou rotacionar bearer token<input type="password" autoComplete="off" value={credentialInput} onChange={e=>setCredentialInput(e.target.value)} placeholder="Novo token (não é exibido após salvar)"/></label><div><button disabled={busy||!credentialInput.trim()} onClick={saveCredential}>Salvar credencial</button><button className="secondary-button" disabled={busy||!servers.find(s=>s.id===selected)?.credential_configured} onClick={revokeCredential}>Remover credencial</button></div></section>}<h3>Executar ferramenta aprovada</h3><p className="note">{activeTool?activeTool.description:"Selecione uma ferramenta na lista."}</p><label>Argumentos JSON<textarea rows={6} value={args} onChange={e=>setArgs(e.target.value)} spellCheck={false}/></label><button disabled={busy||!activeTool||!activeTool.approved} onClick={callTool}>Executar chamada MCP</button></div>
    </section>
    <section className="card mcp-result"><h2>Resultado</h2><p className="note">{notice}</p>{result&&<pre>{result}</pre>}</section>
   </div>}
