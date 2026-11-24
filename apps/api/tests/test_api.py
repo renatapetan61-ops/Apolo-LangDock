@@ -446,3 +446,23 @@ def test_workspace_rbac_member_management_and_owner_protection():
                         json={"role": {"invalid": True}}).status_code == 422
     assert client.delete(f"/api/v1/workspace/members/{owner['Authorization']}", headers=owner).status_code == 404
     assert client.delete(f"/api/v1/workspace/members/{member_id}", headers=owner).status_code == 200
+
+
+def test_member_cannot_manage_workspace_secrets_or_mcp_policy():
+    owner = workspace_headers()
+    member_reg = client.post("/api/v1/auth/register", json={
+        "email": f"rbac-{uuid.uuid4().hex}@example.test",
+        "password": "Correct-Horse-Battery-42!"
+    })
+    member_id = member_reg.json()["user"]["id"]
+    client.post("/api/v1/workspace/members", headers=owner,
+                json={"user_id": member_id, "role": "member"})
+    member_headers = {"Authorization": f"Bearer {member_reg.json()['access_token']}",
+                      "X-Workspace-ID": owner["X-Workspace-ID"]}
+    assert client.post("/api/v1/api-keys", headers=member_headers,
+                       json={"name": "forbidden"}).status_code == 403
+    assert client.post("/api/v1/mcp/servers", headers=member_headers, json={
+        "name": "forbidden", "transport": "stdio", "config_key": "unconfigured"
+    }).status_code == 403
+    assert client.put("/api/v1/usage/limits", headers=member_headers,
+                      json={"monthly_request_limit": 10}).status_code == 403
