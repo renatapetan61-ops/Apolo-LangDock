@@ -11,7 +11,8 @@
 ## Milestone 1 — Functional multi-model chat
 - [ ] Validate provider adapters against real accounts and current API schemas
 - [ ] Streaming responses (SSE)
-- [ ] Persistent conversations and message branching
+- [x] Persistent conversations and message storage (SQLite foundation)
+- [ ] Message branching and provider-native token streaming
 - [ ] Model discovery from provider APIs
 - [ ] Free-quota and rate-limit metadata; never label paid models as free
 
@@ -21,12 +22,14 @@
 - [ ] Database migrations and backups
 
 ## Milestone 3 — Agents and tools
-- [ ] Agent builder with instructions and model selection
+- [x] Agent registry API with instructions, model selection, and tool metadata
+- [ ] Agent builder UI and safe execution runtime
 - [ ] Tool registry with explicit allowlists and approval gates
 - [ ] Tool-call execution sandbox and timeouts
 - [ ] Agent run history and tracing
 
 ## Milestone 4 — Workflow automation
+- [x] Workflow definition registry API (JSON nodes/edges storage)
 - [ ] Visual node editor
 - [ ] Triggers, schedules, conditions, loops, and retries
 - [ ] Durable execution queue and run history
