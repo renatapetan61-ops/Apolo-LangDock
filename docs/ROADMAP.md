@@ -69,6 +69,8 @@
 - [x] Dependabot weekly updates for Python, npm, and GitHub Actions dependencies
 - [x] CI security workflow for pip-audit, npm audit, and Gitleaks secret scanning
 - [ ] Independent security review, remediation of scanner findings, and runtime penetration tests
+- [x] Persistent login rate limiting and baseline API security response headers
+- [x] Additional cross-workspace tests for webhook delivery access
 - [x] Provider usage metering for upstream-reported prompt/completion/total tokens and latency (non-streaming chat)
 - [x] Workspace monthly request/token quotas with owner/admin configuration and audit events
 - [x] Workspace usage summary and event history API; provider cost remains null unless upstream reports it
