@@ -15,6 +15,7 @@
 - [ ] Message branching and provider-native token streaming
 - [x] Live model discovery adapters (provider credentials required)
 - [ ] Free-quota and rate-limit metadata; never label paid models as free
+- [x] Additional OpenAI-compatible providers: Groq, DeepSeek, Mistral AI, and xAI (credentials and model discovery)
 
 ## Milestone 2 — Identity and workspace
 - [x] Registration/login with PBKDF2 password hashes and opaque expiring bearer sessions
@@ -26,7 +27,9 @@
 - [x] Per-key request throttling and workspace audit log foundation
 - [x] Workspace RBAC roles (owner/admin/member), membership administration, and owner protection
 - [ ] Email verification, advanced rate limiting, and secrets management for provider credentials
-- [ ] Database migrations and backups
+- [ ] Runtime database abstraction and PostgreSQL as the production backend
+- [x] One-way SQLite-to-PostgreSQL migration utility with dependency ordering and row-count verification
+- [ ] Versioned schema migrations, rollback strategy, and automated restorable backups
 
 ## Milestone 3 — Agents and tools
 - [x] Agent registry API with instructions, model selection, and tool metadata
