@@ -915,6 +915,10 @@ async def delete_mcp_server(server_id: str, request: Request):
     with _db() as conn:
         conn.execute("DELETE FROM mcp_tools WHERE workspace_id=? AND server_id=?",
                      (request.state.workspace_id, server_id))
+        conn.execute("DELETE FROM mcp_oauth_credentials WHERE workspace_id=? AND server_id=?",
+                     (request.state.workspace_id, server_id))
+        conn.execute("DELETE FROM mcp_oauth_transactions WHERE workspace_id=? AND server_id=?",
+                     (request.state.workspace_id, server_id))
         result = conn.execute("DELETE FROM mcp_servers WHERE id=? AND workspace_id=?",
                               (server_id, request.state.workspace_id))
     if not result.rowcount:
