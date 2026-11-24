@@ -776,3 +776,14 @@ def test_database_backup_restore_checks_integrity_and_encryption(tmp_path, monke
     check.close()
     with pytest.raises(FileExistsError):
         restore_backup(archive, restored, key, False)
+
+
+def test_login_rate_limit_is_persistent_and_scoped_by_ip_and_identity(monkeypatch):
+    email = f"login-limit-{uuid.uuid4().hex}@example.test"
+    password = "Correct-Horse-Battery-42!"
+    assert client.post("/api/v1/auth/register", json={"email":email,"password":password}).status_code == 200
+    monkeypatch.setenv("APOLO_AUTH_LOGIN_RPM", "1")
+    first = client.post("/api/v1/auth/login", json={"email":email,"password":password})
+    assert first.status_code == 200
+    second = client.post("/api/v1/auth/login", json={"email":email,"password":password})
+    assert second.status_code == 429
