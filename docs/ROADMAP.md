@@ -45,7 +45,8 @@
 - [ ] Triggers, schedules, conditions, loops, and retries
 - [ ] Durable execution queue and run history
 - [x] Workspace webhook endpoint registry, encrypted signing secrets, HTTPS host allowlist, HMAC-signed delivery, event hooks, and delivery history
-- [ ] Durable delivery queue, automatic retries/backoff, webhook UI, and external integrations
+- [x] Durable webhook delivery records, authenticated dispatch worker, exponential retries/backoff (8 attempts), and delivery history API
+- [ ] Webhook management UI, dead-letter replay controls, and external integrations
 
 ## Milestone 5 — MCP
 - [x] MCP client with Streamable HTTP and administrator-allowlisted stdio transports
@@ -54,7 +55,8 @@
 - [x] Optional bearer token encrypted at rest (Fernet), with rotation and revocation
 - [x] Separate read-only APOLO MCP server over Streamable HTTP (local-only Compose binding)
 - [x] MCP OAuth authorization-server discovery, PKCE S256 authorization URL, one-time state callback, encrypted token storage, and resource-bound token exchange
-- [ ] OAuth refresh-token rotation, revocation endpoint integration, browser UX, and external-provider interoperability tests
+- [x] OAuth refresh-token rotation with encrypted token endpoint/client/resource metadata and browser connect/status controls
+- [ ] OAuth revocation endpoint integration and external-provider interoperability tests
 - [ ] Audit log, quotas, and per-tool policy scopes
 
 ## Milestone 6 — Production readiness
