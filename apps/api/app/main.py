@@ -515,7 +515,7 @@ async def enforce_identity_and_workspace(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Session invalid or expired."})
         request.state.user_id = row["id"]
         scoped = (path.startswith("/api/v1/conversations") or path.startswith("/api/v1/agents")
-                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/"))
+                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/"))
         if scoped:
             workspace_id = request.headers.get("x-workspace-id", "").strip()
             if not workspace_id:
@@ -741,3 +741,155 @@ async def list_workflow_runs(request: Request):
         rows = conn.execute("SELECT * FROM workflow_runs WHERE workspace_id=? ORDER BY created_at DESC LIMIT 50",
                             (request.state.workspace_id,)).fetchall()
     return {"runs": [dict(row, trace=_json.loads(row["trace"])) for row in rows]}
+
+
+# MCP registry and approval-gated client. Remote hosts and stdio processes are
+# administrator-allowlisted; discovered tools are denied until a workspace owner approves them.
+from .mcp_runtime import MCPRuntimeError, discover_tools as _mcp_discover_tools, invoke_tool as _mcp_invoke_tool, stdio_config as _mcp_stdio_config, validate_http_endpoint as _mcp_validate_endpoint
+
+with _db() as conn:
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS mcp_servers(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
+      transport TEXT NOT NULL, endpoint TEXT, config_key TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mcp_tools(
+      workspace_id TEXT NOT NULL, server_id TEXT NOT NULL, name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '', input_schema TEXT NOT NULL DEFAULT '{}',
+      approved INTEGER NOT NULL DEFAULT 0, discovered_at TEXT NOT NULL,
+      PRIMARY KEY(workspace_id,server_id,name),
+      FOREIGN KEY(server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+    );
+    """)
+
+
+@app.get("/api/v1/mcp/servers")
+async def list_mcp_servers(request: Request):
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM mcp_servers WHERE workspace_id=? ORDER BY created_at DESC",
+                            (request.state.workspace_id,)).fetchall()
+    return {"servers": [dict(row) for row in rows]}
+
+
+@app.post("/api/v1/mcp/servers")
+async def register_mcp_server(payload: dict = Body(...), request: Request = None):
+    name = str(payload.get("name") or "").strip()
+    transport = payload.get("transport")
+    if not name or len(name) > 100:
+        raise HTTPException(status_code=422, detail="A server name (max 100 characters) is required.")
+    endpoint, config_key = None, None
+    try:
+        if transport == "streamable-http":
+            endpoint = _mcp_validate_endpoint(str(payload.get("endpoint") or ""))
+        elif transport == "stdio":
+            config_key = str(payload.get("config_key") or "")
+            if not config_key or len(config_key) > 80:
+                raise MCPRuntimeError("A valid administrator-configured stdio alias is required.")
+            _mcp_stdio_config(config_key)
+        else:
+            raise MCPRuntimeError("Transport must be streamable-http or stdio.")
+    except MCPRuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    server_id, now = str(uuid.uuid4()), _now()
+    with _db() as conn:
+        conn.execute("INSERT INTO mcp_servers(id,workspace_id,name,transport,endpoint,config_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                     (server_id, request.state.workspace_id, name, transport, endpoint, config_key, now, now))
+    return {"id": server_id, "name": name, "transport": transport, "created_at": now}
+
+
+@app.delete("/api/v1/mcp/servers/{server_id}")
+async def delete_mcp_server(server_id: str, request: Request):
+    with _db() as conn:
+        conn.execute("DELETE FROM mcp_tools WHERE workspace_id=? AND server_id=?",
+                     (request.state.workspace_id, server_id))
+        result = conn.execute("DELETE FROM mcp_servers WHERE id=? AND workspace_id=?",
+                              (server_id, request.state.workspace_id))
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="MCP server not found.")
+    return {"deleted": True, "id": server_id}
+
+
+@app.post("/api/v1/mcp/servers/{server_id}/discover")
+async def discover_mcp_server_tools(server_id: str, request: Request):
+    with _db() as conn:
+        server = conn.execute("SELECT * FROM mcp_servers WHERE id=? AND workspace_id=?",
+                              (server_id, request.state.workspace_id)).fetchone()
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP server not found.")
+    try:
+        found = await asyncio.wait_for(
+            _mcp_discover_tools(server["transport"], server["endpoint"], server["config_key"]), timeout=25
+        )
+    except (MCPRuntimeError, Exception) as exc:
+        raise HTTPException(status_code=502, detail=f"MCP discovery failed: {str(exc)[:300]}") from exc
+    now = _now()
+    with _db() as conn:
+        for item in found[:100]:
+            tool_name = item.get("name")
+            if not isinstance(tool_name, str) or not tool_name or len(tool_name) > 128:
+                continue
+            schema = item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {}
+            conn.execute("""INSERT INTO mcp_tools(workspace_id,server_id,name,description,input_schema,approved,discovered_at)
+                VALUES(?,?,?,?,?,0,?) ON CONFLICT(workspace_id,server_id,name) DO UPDATE SET
+                description=excluded.description,input_schema=excluded.input_schema,discovered_at=excluded.discovered_at""",
+                (request.state.workspace_id, server_id, tool_name, str(item.get("description") or "")[:2000],
+                 _json.dumps(schema)[:30000], now))
+        rows = conn.execute("SELECT * FROM mcp_tools WHERE workspace_id=? AND server_id=? ORDER BY name",
+                            (request.state.workspace_id, server_id)).fetchall()
+    return {"server_id": server_id, "discovered": len(found), "tools": [
+        {**dict(row), "input_schema": _json.loads(row["input_schema"]), "approved": bool(row["approved"])}
+        for row in rows
+    ]}
+
+
+@app.get("/api/v1/mcp/servers/{server_id}/tools")
+async def list_mcp_tools(server_id: str, request: Request):
+    with _db() as conn:
+        exists = conn.execute("SELECT 1 FROM mcp_servers WHERE id=? AND workspace_id=?",
+                              (server_id, request.state.workspace_id)).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="MCP server not found.")
+        rows = conn.execute("SELECT * FROM mcp_tools WHERE workspace_id=? AND server_id=? ORDER BY name",
+                            (request.state.workspace_id, server_id)).fetchall()
+    return {"tools": [{**dict(row), "input_schema": _json.loads(row["input_schema"]),
+                       "approved": bool(row["approved"])} for row in rows]}
+
+
+@app.post("/api/v1/mcp/servers/{server_id}/tools/{tool_name}/approval")
+async def set_mcp_tool_approval(server_id: str, tool_name: str, payload: dict = Body(...), request: Request = None):
+    approved = payload.get("approved")
+    if not isinstance(approved, bool):
+        raise HTTPException(status_code=422, detail="approved must be a boolean.")
+    with _db() as conn:
+        result = conn.execute("UPDATE mcp_tools SET approved=? WHERE workspace_id=? AND server_id=? AND name=?",
+                              (1 if approved else 0, request.state.workspace_id, server_id, tool_name))
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Discovered MCP tool not found.")
+    return {"server_id": server_id, "tool_name": tool_name, "approved": approved}
+
+
+@app.post("/api/v1/mcp/servers/{server_id}/tools/{tool_name}/call")
+async def call_approved_mcp_tool(server_id: str, tool_name: str, payload: dict = Body(default={}), request: Request = None):
+    arguments = payload.get("arguments", {})
+    if not isinstance(arguments, dict) or len(_json.dumps(arguments)) > 30000:
+        raise HTTPException(status_code=422, detail="Tool arguments must be a JSON object no larger than 30 KB.")
+    with _db() as conn:
+        row = conn.execute("""SELECT s.*,t.approved FROM mcp_servers s JOIN mcp_tools t
+            ON t.server_id=s.id AND t.workspace_id=s.workspace_id
+            WHERE s.id=? AND s.workspace_id=? AND t.name=?""",
+            (server_id, request.state.workspace_id, tool_name)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP tool not found.")
+    if not row["approved"]:
+        raise HTTPException(status_code=403, detail="This MCP tool has not been approved by the workspace.")
+    try:
+        result = await asyncio.wait_for(
+            _mcp_invoke_tool(row["transport"], tool_name, arguments, row["endpoint"], row["config_key"]),
+            timeout=30
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="MCP tool execution timed out.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MCP tool execution failed: {str(exc)[:300]}") from exc
+    return result
