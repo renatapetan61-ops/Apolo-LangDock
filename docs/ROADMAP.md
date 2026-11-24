@@ -47,8 +47,9 @@
 - [x] MCP client with Streamable HTTP and administrator-allowlisted stdio transports
 - [x] Workspace-scoped MCP server registry and tool discovery
 - [x] Per-tool explicit approval and revocation before invocation
+- [x] Optional bearer token encrypted at rest (Fernet), with rotation and revocation
 - [x] Separate read-only APOLO MCP server over Streamable HTTP (local-only Compose binding)
-- [ ] Remote MCP OAuth/bearer credential vault and secret rotation
+- [ ] OAuth 2.1 flows and broader authentication provider support
 - [ ] Audit log, quotas, and per-tool policy scopes
 
 ## Milestone 6 — Production readiness
