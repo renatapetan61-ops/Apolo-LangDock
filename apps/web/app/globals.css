@@ -90,3 +90,20 @@ h1 { font-size: clamp(30px, 5vw, 48px); margin: 12px 0; }
 .saved-workflows button.selected{border-color:var(--accent,#7468f0);background:rgba(116,104,240,.12)}
 .saved-workflows small{opacity:.7}.workflow-side>h2{margin-top:0}.workflow-result{grid-column:1/-1}.workflow-result pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;border-radius:10px;background:var(--surface,#101827)}
 @media(max-width:800px){.workflow-layout{grid-template-columns:1fr}.workflow-result{grid-column:auto}.workflow-toolbar{align-items:stretch;flex-direction:column}}
+
+.mcp-layout{display:grid;grid-template-columns:minmax(280px,1fr) minmax(320px,1.2fr);gap:18px}
+.mcp-card,.mcp-result{padding:22px}.mcp-card h2{margin-top:0}
+.mcp-server-list,.mcp-tool-list{display:grid;gap:8px;margin-top:14px;max-height:320px;overflow:auto}
+.mcp-server-list>div,.mcp-tool-list article{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;border:1px solid var(--border,#30394b);border-radius:9px}
+.mcp-server-list>div.active,.mcp-tool-list article.active{border-color:var(--accent,#7468f0);background:rgba(116,104,240,.1)}
+.server-select,.tool-select{display:grid;gap:5px;min-width:0;text-align:left;border:0;background:transparent;color:inherit;cursor:pointer;overflow-wrap:anywhere}
+.server-select small,.tool-select small{opacity:.7;overflow-wrap:anywhere}
+.danger-link{border:0;background:transparent;color:#e58b8b;cursor:pointer}
+.mcp-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px}.mcp-toolbar h2{margin:0}
+.mcp-toolbar button,.mcp-call>button{padding:10px 12px;border:0;border-radius:8px;background:var(--accent,#7468f0);color:white;font-weight:700;cursor:pointer}
+.approval{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:12px}
+.mcp-call{margin-top:24px;padding-top:18px;border-top:1px solid var(--border,#30394b)}
+.mcp-call label{display:grid;gap:8px;font-size:13px;font-weight:600}
+.mcp-call textarea{width:100%;padding:11px;border:1px solid var(--border,#30394b);border-radius:9px;background:var(--surface,#101827);color:inherit;font:inherit;font-family:monospace}
+.mcp-call>button{margin-top:12px}.mcp-result{grid-column:1/-1}.mcp-result pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border-radius:9px;background:var(--surface,#101827)}
+@media(max-width:800px){.mcp-layout{grid-template-columns:1fr}.mcp-result{grid-column:auto}.mcp-toolbar{align-items:flex-start;flex-direction:column}}
