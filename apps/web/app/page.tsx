@@ -148,7 +148,7 @@ export default function Home() {
     <aside className="sidebar">
       <div className="brand">APOLO <span>LANGDOCK</span></div>
       <button className="new-chat" onClick={newConversation}>＋ Nova conversa</button>
-      <div className="nav"><div className="active">◉ Chat multimodelo</div><div>✧ Modelos</div><a href="/agents">◈ Construtor de agentes</a><a href="/workflows">⌘ Workflows</a><a href="/mcp">⌁ Cliente MCP</a><a href="/api-keys">⌘ API e chaves</a><div>⚙ Configurações</div></div>
+      <div className="nav"><div className="active">◉ Chat multimodelo</div><div>✧ Modelos</div><a href="/agents">◈ Construtor de agentes</a><a href="/workflows">⌘ Workflows</a><a href="/mcp">⌁ Cliente MCP</a><a href="/webhooks">↗ Webhooks</a><a href="/api-keys">⌘ API e chaves</a><div>⚙ Configurações</div></div>
       <label className="history-title" htmlFor="workspace">Workspace</label>
       <select id="workspace" value={workspaceId} onChange={e=>{setWorkspaceId(e.target.value);setConversationId("");setMessages([]);}}>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
       <h3 className="history-title">Histórico</h3>
