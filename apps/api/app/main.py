@@ -617,7 +617,14 @@ async def enforce_identity_and_workspace(request: Request, call_next):
             if not member:
                 return JSONResponse(status_code=403, content={"detail": "Workspace access denied."})
             request.state.workspace_id = workspace_id
-    return await call_next(request)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 
 @app.post("/api/v1/auth/logout")
