@@ -683,3 +683,29 @@ def test_mcp_oauth_refresh_rotates_access_and_refresh_tokens(monkeypatch):
     assert _mcp_decrypt_secret(row["access_ciphertext"]) == "new-access"
     assert _mcp_decrypt_secret(row["refresh_ciphertext"]) == "rotated-refresh"
     assert row["expires_at"] is not None and row["expires_at"] > _now()
+
+
+def test_streaming_usage_is_recorded_and_attributed_to_api_key(monkeypatch):
+    from app.main import _db
+    headers = workspace_headers()
+    key = client.post("/api/v1/api-keys", headers=headers, json={
+        "name": "stream meter", "scopes": ["chat:completions"]
+    }).json()["api_key"]
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    async def fake_stream(*args, **kwargs):
+        yield "data: " + __import__("json").dumps({"choices":[{"delta":{"content":"hello"}}]}) + "\\n\\n"
+        yield "event: usage\\ndata: " + __import__("json").dumps({"prompt_tokens":7,"completion_tokens":5,"total_tokens":12}) + "\\n\\n"
+        yield "data: [DONE]\\n\\n"
+    monkeypatch.setattr("app.main._openai_stream", fake_stream)
+    response = client.post("/api/v1/public/chat/stream", headers={"X-API-Key": key}, json={
+        "model": "openai/test-model", "messages": [{"role":"user","content":"hi"}]
+    })
+    assert response.status_code == 200
+    assert "hello" in response.text and "[DONE]" in response.text
+    with _db() as conn:
+        row = conn.execute("SELECT api_key_id,prompt_tokens,completion_tokens,total_tokens,status FROM usage_events WHERE workspace_id=? ORDER BY created_at DESC LIMIT 1",
+                           (headers["X-Workspace-ID"],)).fetchone()
+    assert row["api_key_id"] is not None
+    assert (row["prompt_tokens"],row["completion_tokens"],row["total_tokens"],row["status"]) == (7,5,12,"succeeded")
+    usage = client.get("/api/v1/api-keys/"+client.get("/api/v1/api-keys",headers=headers).json()["api_keys"][0]["id"]+"/usage",headers=headers)
+    assert usage.status_code == 200
