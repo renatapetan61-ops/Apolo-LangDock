@@ -11,7 +11,7 @@ Webhook events are persisted in `webhook_deliveries` before the first network re
 
 ## Dispatch
 
-Schedule an external cron/job runner to call:
+A GitHub Actions schedule is included in `.github/workflows/webhook-worker.yml` (every five minutes). Configure the repository Actions secrets `APOLO_WEBHOOK_WORKER_URL` (base API URL, HTTPS) and `APOLO_WEBHOOK_WORKER_TOKEN`. If you use another scheduler, call the endpoint directly:
 
 ```http
 POST /internal/webhooks/dispatch?limit=25
