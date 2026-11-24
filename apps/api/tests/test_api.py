@@ -290,3 +290,35 @@ def test_mcp_stdio_requires_admin_configured_alias(monkeypatch):
         "name": "Unknown stdio", "transport": "stdio", "config_key": "untrusted-command"
     })
     assert response.status_code == 400
+
+
+def test_mcp_bearer_credentials_are_encrypted_and_hidden(monkeypatch):
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("APOLO_MCP_ENCRYPTION_KEY", key)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "secure-tools.example.test")
+    headers = workspace_headers()
+    raw_token = "mcp-secret-token-value"
+    response = client.post("/api/v1/mcp/servers", headers=headers, json={
+        "name": "Secure MCP", "transport": "streamable-http",
+        "endpoint": "https://secure-tools.example.test/mcp", "bearer_token": raw_token
+    })
+    assert response.status_code == 200
+    server_id = response.json()["id"]
+    listed = client.get("/api/v1/mcp/servers", headers=headers)
+    assert "auth_ciphertext" not in listed.json()["servers"][0]
+    assert raw_token not in listed.text
+    with __import__("app.main", fromlist=["_db"])._db() as conn:
+        row = conn.execute("SELECT auth_ciphertext FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
+    assert row["auth_ciphertext"] != raw_token
+    assert __import__("app.main", fromlist=["_mcp_decrypt_secret"])._mcp_decrypt_secret(row["auth_ciphertext"]) == raw_token
+
+    rotated = client.post(f"/api/v1/mcp/servers/{server_id}/credentials", headers=headers,
+                          json={"bearer_token": "rotated-secret"})
+    assert rotated.status_code == 200
+    assert rotated.json()["credential_configured"] is True
+    revoked = client.delete(f"/api/v1/mcp/servers/{server_id}/credentials", headers=headers)
+    assert revoked.status_code == 200
+    with __import__("app.main", fromlist=["_db"])._db() as conn:
+        row = conn.execute("SELECT auth_ciphertext FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
+    assert row["auth_ciphertext"] is None
