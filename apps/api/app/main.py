@@ -298,3 +298,102 @@ async def save_workflow(payload: dict = Body(...)):
         definition=excluded.definition,updated_at=excluded.updated_at""",
         (workflow_id,name,str(payload.get("description",""))[:1000],_json.dumps(definition),now,now))
     return {"id":workflow_id,"name":name,"saved":True}
+
+
+# Server-sent events (SSE). OpenAI-compatible adapters stream native deltas.
+from fastapi.responses import StreamingResponse
+import asyncio
+
+async def _openai_stream(base_url: str, key: str | None, model: str, body: dict[str, Any]):
+    headers={"Content-Type":"application/json"}
+    if key: headers["Authorization"]=f"Bearer {key}"
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("POST",f"{base_url.rstrip('/')}/chat/completions",
+             headers=headers,json={**body,"model":model,"stream":True}) as response:
+            if response.status_code >= 400:
+                detail=(await response.aread()).decode("utf-8","replace")[:1000]
+                yield "event: error\ndata: "+_json.dumps({"error":detail})+"\n\n"
+                return
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"): continue
+                raw=line[5:].strip()
+                if raw=="[DONE]":
+                    yield "data: [DONE]\n\n"
+                    return
+                try:
+                    packet=_json.loads(raw)
+                    delta=packet.get("choices",[{}])[0].get("delta",{}).get("content")
+                    if delta:
+                        yield "data: "+_json.dumps({"delta":delta},ensure_ascii=False)+"\n\n"
+                except (ValueError,TypeError,IndexError):
+                    continue
+
+async def _anthropic_stream(model: str, messages: list[ChatMessage], max_tokens: int, temperature: float):
+    key=_key("anthropic")
+    if not key:
+        yield "event: error\ndata: "+_json.dumps({"error":"Configure ANTHROPIC_API_KEY."})+"\n\n"
+        return
+    system="\n".join(m.content for m in messages if m.role=="system")
+    payload={"model":model,"max_tokens":max_tokens,"temperature":temperature,
+             "messages":[{"role":m.role,"content":m.content} for m in messages if m.role in {"user","assistant"}],"stream":True}
+    if system: payload["system"]=system
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("POST","https://api.anthropic.com/v1/messages",
+             headers={"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},json=payload) as response:
+            if response.status_code>=400:
+                yield "event: error\ndata: "+_json.dumps({"error":(await response.aread()).decode("utf-8","replace")[:1000]})+"\n\n"
+                return
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    try:
+                        event=_json.loads(line[5:].strip())
+                        if event.get("type")=="content_block_delta":
+                            delta=event.get("delta",{}).get("text")
+                            if delta: yield "data: "+_json.dumps({"delta":delta},ensure_ascii=False)+"\n\n"
+                    except ValueError: pass
+    yield "data: [DONE]\n\n"
+
+async def _google_stream(model: str, messages: list[ChatMessage], max_tokens: int, temperature: float):
+    key=_key("google")
+    if not key:
+        yield "event: error\ndata: "+_json.dumps({"error":"Configure GOOGLE_API_KEY."})+"\n\n"
+        return
+    system="\n".join(m.content for m in messages if m.role=="system")
+    contents=[{"role":"model" if m.role=="assistant" else "user","parts":[{"text":m.content}]} for m in messages if m.role!="system"]
+    payload={"contents":contents,"generationConfig":{"temperature":temperature,"maxOutputTokens":max_tokens}}
+    if system: payload["systemInstruction"]={"parts":[{"text":system}]}
+    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent"
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("POST",url,params={"key":key,"alt":"sse"},json=payload) as response:
+            if response.status_code>=400:
+                yield "event: error\ndata: "+_json.dumps({"error":(await response.aread()).decode("utf-8","replace")[:1000]})+"\n\n"
+                return
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    try:
+                        packet=_json.loads(line[5:].strip())
+                        for part in packet.get("candidates",[{}])[0].get("content",{}).get("parts",[]):
+                            delta=part.get("text")
+                            if delta: yield "data: "+_json.dumps({"delta":delta},ensure_ascii=False)+"\n\n"
+                    except (ValueError,IndexError,TypeError): pass
+    yield "data: [DONE]\n\n"
+
+@app.post("/api/v1/chat/stream")
+async def chat_stream(request: ChatRequest):
+    provider, separator, model=request.model.partition("/")
+    if not separator or not model or provider not in PROVIDER_INFO:
+        raise HTTPException(status_code=400,detail="Use a supported provider/model identifier.")
+    body={"messages":[{"role":m.role,"content":m.content} for m in request.messages],
+          "temperature":request.temperature,"max_tokens":request.max_tokens}
+    if provider in {"openrouter","openai","ollama"}:
+        if provider!="ollama" and not _key(provider):
+            raise HTTPException(status_code=503,detail=f"Configure {provider.upper()} credentials on the server.")
+        base={"openrouter":"https://openrouter.ai/api/v1","openai":"https://api.openai.com/v1",
+              "ollama":os.getenv("OLLAMA_BASE_URL","http://host.docker.internal:11434/v1")}[provider]
+        generator=_openai_stream(base,_key(provider),model,body)
+    elif provider=="anthropic":
+        generator=_anthropic_stream(model,request.messages,request.max_tokens or 1024,request.temperature or 0.7)
+    else:
+        generator=_google_stream(model,request.messages,request.max_tokens or 1024,request.temperature or 0.7)
+    return StreamingResponse(generator,media_type="text/event-stream",
+        headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
