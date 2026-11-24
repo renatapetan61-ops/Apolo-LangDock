@@ -515,7 +515,7 @@ async def enforce_identity_and_workspace(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Session invalid or expired."})
         request.state.user_id = row["id"]
         scoped = (path.startswith("/api/v1/conversations") or path.startswith("/api/v1/agents")
-                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/chat/"))
+                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/"))
         if scoped:
             workspace_id = request.headers.get("x-workspace-id", "").strip()
             if not workspace_id:
