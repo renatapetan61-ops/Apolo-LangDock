@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 APP_VERSION = "0.3.0"
 app = FastAPI(title="APOLO LangDock API", version=APP_VERSION, description="Open AI workspace API. Provider quotas and pricing are controlled by upstream providers.")
 origins = [item.strip() for item in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if item.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST"], allow_headers=["Content-Type", "Authorization"])
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization", "X-Workspace-ID"])
 
 PROVIDER_INFO = {
     "openrouter": ("OpenRouter", "Selected free routes; quotas and availability vary."),
@@ -503,7 +503,7 @@ from fastapi.responses import JSONResponse
 async def enforce_identity_and_workspace(request: Request, call_next):
     path = request.url.path
     public = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/providers", "/api/v1/models"}
-    if path.startswith("/api/v1/") and not public:
+    if path.startswith("/api/v1/") and not public and request.method != "OPTIONS":
         auth = request.headers.get("authorization", "")
         if not auth.lower().startswith("bearer "):
             return JSONResponse(status_code=401, content={"detail": "Authentication required."})
