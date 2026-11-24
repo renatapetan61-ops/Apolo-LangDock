@@ -52,3 +52,23 @@ def test_live_model_discovery_uses_provider_adapter(monkeypatch):
     payload = response.json()
     assert payload["discovery"] == "live"
     assert any(model["id"] == "ollama/qwen2.5" for model in payload["models"])
+
+
+def test_conversation_persistence_and_delete():
+    created = client.post("/api/v1/conversations", json={"title":"Persistência de teste","model":"ollama/qwen2.5"})
+    assert created.status_code == 200
+    conversation_id = created.json()["id"]
+    saved = client.post(f"/api/v1/conversations/{conversation_id}/messages", json={"role":"user","content":"Olá"})
+    assert saved.status_code == 200
+    history = client.get(f"/api/v1/conversations/{conversation_id}/messages")
+    assert history.status_code == 200
+    assert history.json()["messages"][0]["content"] == "Olá"
+    assert client.delete(f"/api/v1/conversations/{conversation_id}").json()["deleted"] is True
+
+def test_agent_and_workflow_registry():
+    agent = client.post("/api/v1/agents", json={"name":"Assistente de teste","instructions":"Responda com clareza","tools":[]})
+    assert agent.status_code == 200
+    assert any(item["id"] == agent.json()["id"] for item in client.get("/api/v1/agents").json()["agents"])
+    workflow = client.post("/api/v1/workflows", json={"name":"Fluxo de teste","definition":{"nodes":[],"edges":[]}})
+    assert workflow.status_code == 200
+    assert any(item["id"] == workflow.json()["id"] for item in client.get("/api/v1/workflows").json()["workflows"])
