@@ -770,6 +770,7 @@ def test_database_backup_restore_checks_integrity_and_encryption(tmp_path, monke
     archive = tmp_path / "backup.enc"
     created = create_backup(source, archive, key)
     assert created["encrypted"] is True
+    assert archive.stat().st_mode & 0o777 == 0o600
     restored = tmp_path / "restored.sqlite3"
     result = restore_backup(archive, restored, key, False)
     assert result["integrity_check"] == "ok"
