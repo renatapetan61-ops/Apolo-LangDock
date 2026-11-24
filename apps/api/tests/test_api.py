@@ -337,6 +337,7 @@ def test_workspace_api_keys_public_chat_scopes_and_revocation(monkeypatch):
         "name": "Integração CI", "scopes": ["chat:completions", "models:read"], "expires_in_days": 30
     })
     assert created.status_code == 200
+    assert client.post("/api/v1/api-keys", headers=headers, json={"name": "Invalid", "scopes": [{}]}).status_code == 422
     key = created.json()["api_key"]
     key_headers = {"X-API-Key": key}
     listed = client.get("/api/v1/api-keys", headers=headers)
