@@ -842,7 +842,8 @@ async def discover_mcp_server_tools(server_id: str, request: Request):
         raise HTTPException(status_code=404, detail="MCP server not found.")
     try:
         found = await asyncio.wait_for(
-            _mcp_discover_tools(server["transport"], server["endpoint"], server["config_key"], _mcp_decrypt_secret(server["auth_ciphertext"])), timeout=25
+            _mcp_discover_tools(server["transport"], server["endpoint"], server["config_key"],
+                                _mcp_effective_access_token(server_id, request.state.workspace_id, server["auth_ciphertext"])), timeout=25
         )
     except HTTPException:
         raise
@@ -912,7 +913,7 @@ async def call_approved_mcp_tool(server_id: str, tool_name: str, payload: dict =
         raise HTTPException(status_code=403, detail="This MCP tool has not been approved by the workspace.")
     try:
         result = await asyncio.wait_for(
-            _mcp_invoke_tool(row["transport"], tool_name, arguments, row["endpoint"], row["config_key"], _mcp_decrypt_secret(row["auth_ciphertext"])),
+            _mcp_invoke_tool(row["transport"], tool_name, arguments, row["endpoint"], row["config_key"], _mcp_effective_access_token(server_id, request.state.workspace_id, row["auth_ciphertext"])),
             timeout=30
         )
     except asyncio.TimeoutError as exc:
@@ -947,6 +948,17 @@ def _mcp_decrypt_secret(ciphertext: str | None) -> str | None:
         return _mcp_fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
     except InvalidToken as exc:
         raise HTTPException(status_code=500, detail="Stored MCP credential cannot be decrypted; verify the encryption key.") from exc
+
+def _mcp_effective_access_token(server_id: str, workspace_id: str, bearer_ciphertext: str | None) -> str | None:
+    with _db() as conn:
+        oauth = conn.execute("SELECT access_ciphertext,expires_at FROM mcp_oauth_credentials WHERE server_id=? AND workspace_id=?",
+                             (server_id, workspace_id)).fetchone()
+    if oauth:
+        if oauth["expires_at"] and oauth["expires_at"] <= _now():
+            raise HTTPException(status_code=401, detail="MCP OAuth access token expired. Reconnect this server; refresh-token rotation is not yet enabled.")
+        return _mcp_decrypt_secret(oauth["access_ciphertext"])
+    return _mcp_decrypt_secret(bearer_ciphertext)
+
 
 
 @app.post("/api/v1/mcp/servers/{server_id}/credentials")
@@ -1684,6 +1696,8 @@ async def mcp_oauth_callback(code: str | None = None, state: str | None = None,
     if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0:
         expiry = (datetime.now(timezone.utc) + __import__("datetime").timedelta(seconds=min(int(expires_in), 31536000))).isoformat()
     with _db() as conn:
+        conn.execute("UPDATE mcp_servers SET auth_mode='oauth',updated_at=? WHERE id=? AND workspace_id=?",
+                     (_now(), tx["server_id"], tx["workspace_id"]))
         conn.execute("""INSERT INTO mcp_oauth_credentials(server_id,workspace_id,issuer,access_ciphertext,refresh_ciphertext,
             expires_at,scope,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET
             workspace_id=excluded.workspace_id,issuer=excluded.issuer,access_ciphertext=excluded.access_ciphertext,
@@ -1704,6 +1718,8 @@ async def revoke_mcp_oauth(server_id: str, request: Request):
     with _db() as conn:
         result = conn.execute("DELETE FROM mcp_oauth_credentials WHERE server_id=? AND workspace_id=?",
                               (server_id, request.state.workspace_id))
+        conn.execute("UPDATE mcp_servers SET auth_mode='bearer',updated_at=? WHERE id=? AND workspace_id=?",
+                     (_now(), server_id, request.state.workspace_id))
     if not result.rowcount:
         raise HTTPException(status_code=404, detail="OAuth credentials not found.")
     _audit(request.state.workspace_id, request.state.user_id, "mcp.oauth.revoked", "mcp_server", server_id)
