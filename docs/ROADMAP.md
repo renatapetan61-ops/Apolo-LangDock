@@ -10,20 +10,20 @@
 
 ## Milestone 1 — Functional multi-model chat
 - [ ] Validate provider adapters against real accounts and current API schemas
-- [ ] Streaming responses (SSE)
+- [x] Streaming responses (SSE) for OpenAI-compatible, Anthropic, and Gemini adapters
 - [x] Persistent conversations and message storage (SQLite foundation)
 - [ ] Message branching and provider-native token streaming
 - [ ] Model discovery from provider APIs
 - [ ] Free-quota and rate-limit metadata; never label paid models as free
 
 ## Milestone 2 — Identity and workspace
-- [ ] Authentication, user sessions, workspace membership
+- [x] Registration/login with PBKDF2 password hashes and opaque expiring bearer sessions\n- [x] Workspace creation and membership listing (owner role)\n- [ ] Enforce workspace scoping across conversations, agents, workflows, and secrets
 - [ ] Roles, permissions, audit log, and secrets management
 - [ ] Database migrations and backups
 
 ## Milestone 3 — Agents and tools
 - [x] Agent registry API with instructions, model selection, and tool metadata
-- [ ] Agent builder UI and safe execution runtime
+- [ ] Agent builder UI and safe execution runtime\n- [ ] Multi-agent orchestration with bounded steps and shared run tracing
 - [ ] Tool registry with explicit allowlists and approval gates
 - [ ] Tool-call execution sandbox and timeouts
 - [ ] Agent run history and tracing
