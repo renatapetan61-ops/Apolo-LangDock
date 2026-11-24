@@ -13,7 +13,7 @@ export default function WebhooksPage(){
  const [hooks,setHooks]=useState<Hook[]>([]);const [selected,setSelected]=useState("");
  const [deliveries,setDeliveries]=useState<Delivery[]>([]);
  const [name,setName]=useState("");const [url,setUrl]=useState("");const [secret,setSecret]=useState("");
- const [events,setEvents]=useState<string[]>(["usage.recorded"]);
+ const [events,setEvents]=useState<string[]>(["usage.recorded","test.ping"]);
  const [notice,setNotice]=useState("Carregando webhooks...");const [busy,setBusy]=useState(false);
  function headers(json=false){return {...(json?{"Content-Type":"application/json"}:{}),Authorization:"Bearer "+token,"X-Workspace-ID":workspaceId};}
  async function load(t=token,w=workspaceId){
@@ -43,7 +43,7 @@ export default function WebhooksPage(){
   try{
    const r=await fetch(API+"/api/v1/webhooks",{method:"POST",headers:headers(true),body:JSON.stringify({name,url,secret,events})});
    const d=await r.json();if(!r.ok)throw new Error(d.detail||"Falha ao criar webhook.");
-   setName("");setUrl("");setSecret("");setEvents(["usage.recorded"]);setSelected(d.id);
+   setName("");setUrl("");setSecret("");setEvents(["usage.recorded","test.ping"]);setSelected(d.id);
    await load();await loadDeliveries(d.id);setNotice("Webhook criado. O segredo não será exibido novamente.");
   }catch(e){setNotice(e instanceof Error?e.message:"Falha ao criar webhook.");}
   finally{setBusy(false);}
