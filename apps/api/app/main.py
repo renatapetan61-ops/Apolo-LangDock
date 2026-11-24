@@ -128,6 +128,8 @@ async def chat_completions(request: ChatRequest, http_request: Request):
     if not separator or not model or provider not in PROVIDER_INFO:
         raise HTTPException(status_code=400, detail="Use a supported provider/model identifier.")
     body: dict[str, Any] = {"messages": [{"role": m.role, "content": m.content} for m in request.messages], "temperature": request.temperature, "max_tokens": request.max_tokens}
+    _check_workspace_quota(http_request)
+    usage_started = time.monotonic()
 
     if provider in {"openrouter", "openai", "ollama"}:
         if provider != "ollama" and not _key(provider):
@@ -148,6 +150,7 @@ async def chat_completions(request: ChatRequest, http_request: Request):
         if response.status_code >= 400:
             raise HTTPException(status_code=502, detail={"provider_error": response.text[:1200], "status": response.status_code})
         data = response.json()
+        usage_data = data.get("usageMetadata", {})
         answer = "".join(part.get("text", "") for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
         result = {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion", "created": int(time.time()), "model": request.model, "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}]}
     else:
@@ -163,8 +166,13 @@ async def chat_completions(request: ChatRequest, http_request: Request):
         if response.status_code >= 400:
             raise HTTPException(status_code=502, detail={"provider_error": response.text[:1200], "status": response.status_code})
         data = response.json()
+        usage_data = data.get("usage", {})
         answer = "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
         result = {"id": data.get("id", f"chatcmpl-{uuid.uuid4().hex}"), "object": "chat.completion", "created": int(time.time()), "model": request.model, "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": data.get("stop_reason", "stop")}]}
+    if provider in {"openrouter", "openai", "ollama"}:
+        usage_data = result.get("usage", {}) if isinstance(result, dict) else {}
+    _record_usage(http_request, request.model, provider, usage_data if isinstance(usage_data, dict) else {},
+                  result, int((time.monotonic() - usage_started) * 1000), "succeeded")
     return result
 
 
@@ -515,7 +523,7 @@ async def enforce_identity_and_workspace(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Session invalid or expired."})
         request.state.user_id = row["id"]
         scoped = (path.startswith("/api/v1/conversations") or path.startswith("/api/v1/agents")
-                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/") or path.startswith("/api/v1/api-keys") or path.startswith("/api/v1/audit-logs"))
+                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/") or path.startswith("/api/v1/api-keys") or path.startswith("/api/v1/audit-logs") or path.startswith("/api/v1/usage/"))
         if scoped:
             workspace_id = request.headers.get("x-workspace-id", "").strip()
             if not workspace_id:
@@ -986,6 +994,16 @@ with _db() as conn:
       details TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace ON audit_logs(workspace_id,created_at);
+    CREATE TABLE IF NOT EXISTS usage_events(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, api_key_id TEXT, provider TEXT NOT NULL,
+      model TEXT NOT NULL, prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+      cost_usd REAL, latency_ms INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_workspace_created ON usage_events(workspace_id,created_at);
+    CREATE TABLE IF NOT EXISTS workspace_usage_limits(
+      workspace_id TEXT PRIMARY KEY, monthly_token_limit INTEGER, monthly_request_limit INTEGER,
+      updated_at TEXT NOT NULL
+    );
     """)
 
 
@@ -1099,3 +1117,123 @@ async def list_audit_logs(request: Request):
         rows = conn.execute("SELECT id,actor_user_id,action,resource_type,resource_id,details,created_at FROM audit_logs WHERE workspace_id=? ORDER BY created_at DESC LIMIT 100",
                             (request.state.workspace_id,)).fetchall()
     return {"events": [{**dict(row), "details": _json.loads(row["details"])} for row in rows]}
+
+
+# Workspace usage metering and configurable monthly quotas.
+def _usage_counts(provider: str, usage: dict) -> tuple[int | None, int | None, int | None, float | None]:
+    def number(*keys):
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                return int(value)
+        return None
+    if provider == "anthropic":
+        prompt = number("input_tokens", "prompt_tokens")
+        completion = number("output_tokens", "completion_tokens")
+    elif provider == "google":
+        prompt = number("promptTokenCount", "prompt_tokens")
+        completion = number("candidatesTokenCount", "completion_tokens")
+    else:
+        prompt = number("prompt_tokens", "input_tokens")
+        completion = number("completion_tokens", "output_tokens")
+    total = number("total_tokens")
+    if total is None and (prompt is not None or completion is not None):
+        total = (prompt or 0) + (completion or 0)
+    cost = usage.get("cost")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+        cost = usage.get("cost_usd")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+        cost = None
+    return prompt, completion, total, float(cost) if cost is not None else None
+
+
+def _month_start() -> str:
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
+def _check_workspace_quota(request: Request):
+    workspace_id = getattr(request.state, "workspace_id", None)
+    if not workspace_id:
+        return
+    with _db() as conn:
+        limits = conn.execute("SELECT * FROM workspace_usage_limits WHERE workspace_id=?", (workspace_id,)).fetchone()
+        if not limits:
+            return
+        since = _month_start()
+        row = conn.execute("""SELECT COUNT(*) AS requests, COALESCE(SUM(total_tokens),0) AS tokens
+            FROM usage_events WHERE workspace_id=? AND created_at>=? AND status='succeeded'""",
+            (workspace_id, since)).fetchone()
+    if limits["monthly_request_limit"] is not None and row["requests"] >= limits["monthly_request_limit"]:
+        raise HTTPException(status_code=429, detail="Workspace monthly request quota reached.")
+    if limits["monthly_token_limit"] is not None and row["tokens"] >= limits["monthly_token_limit"]:
+        raise HTTPException(status_code=429, detail="Workspace monthly token quota reached.")
+
+
+def _record_usage(request: Request, model_id: str, provider: str, usage: dict,
+                  response_payload: dict, latency_ms: int, status: str):
+    workspace_id = getattr(request.state, "workspace_id", None)
+    if not workspace_id:
+        return
+    prompt, completion, total, cost = _usage_counts(provider, usage)
+    with _db() as conn:
+        conn.execute("""INSERT INTO usage_events
+            (id,workspace_id,api_key_id,provider,model,prompt_tokens,completion_tokens,total_tokens,cost_usd,latency_ms,status,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), workspace_id, getattr(request.state, "api_key_id", None), provider,
+             model_id, prompt, completion, total, cost, max(0, latency_ms), status, _now()))
+
+
+@app.get("/api/v1/usage/summary")
+async def usage_summary(request: Request):
+    since = _month_start()
+    with _db() as conn:
+        rows = conn.execute("""SELECT provider,model,COUNT(*) AS requests,
+            SUM(prompt_tokens) AS prompt_tokens,SUM(completion_tokens) AS completion_tokens,
+            SUM(total_tokens) AS total_tokens,SUM(cost_usd) AS reported_cost_usd,
+            AVG(latency_ms) AS average_latency_ms
+            FROM usage_events WHERE workspace_id=? AND created_at>=? AND status='succeeded'
+            GROUP BY provider,model ORDER BY requests DESC""", (request.state.workspace_id, since)).fetchall()
+        limits = conn.execute("SELECT * FROM workspace_usage_limits WHERE workspace_id=?",
+                              (request.state.workspace_id,)).fetchone()
+        totals = conn.execute("""SELECT COUNT(*) AS requests,COALESCE(SUM(total_tokens),0) AS tokens,
+            SUM(cost_usd) AS reported_cost_usd FROM usage_events
+            WHERE workspace_id=? AND created_at>=? AND status='succeeded'""",
+            (request.state.workspace_id, since)).fetchone()
+    return {"period_start": since, "totals": dict(totals),
+            "limits": dict(limits) if limits else {"monthly_token_limit": None, "monthly_request_limit": None},
+            "by_model": [dict(row) for row in rows],
+            "cost_note": "Costs are shown only when the upstream provider returns a numeric cost. Missing prices are null, never estimated."}
+
+
+@app.put("/api/v1/usage/limits")
+async def update_usage_limits(payload: dict = Body(...), request: Request = None):
+    token_limit = payload.get("monthly_token_limit")
+    request_limit = payload.get("monthly_request_limit")
+    for value in (token_limit, request_limit):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+            raise HTTPException(status_code=422, detail="Quota limits must be positive integers or null.")
+    with _db() as conn:
+        member = conn.execute("SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                              (request.state.workspace_id, request.state.user_id)).fetchone()
+        if not member or member["role"] not in {"owner", "admin"}:
+            raise HTTPException(status_code=403, detail="Only workspace owners and admins can change quotas.")
+        conn.execute("""INSERT INTO workspace_usage_limits(workspace_id,monthly_token_limit,monthly_request_limit,updated_at)
+            VALUES(?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET
+            monthly_token_limit=excluded.monthly_token_limit,monthly_request_limit=excluded.monthly_request_limit,
+            updated_at=excluded.updated_at""",
+            (request.state.workspace_id, token_limit, request_limit, _now()))
+    _audit(request.state.workspace_id, request.state.user_id, "usage.limits.updated", "workspace",
+           request.state.workspace_id, {"monthly_token_limit": token_limit, "monthly_request_limit": request_limit})
+    return {"monthly_token_limit": token_limit, "monthly_request_limit": request_limit}
+
+
+@app.get("/api/v1/usage/events")
+async def usage_events(request: Request, limit: int = 100):
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500.")
+    with _db() as conn:
+        rows = conn.execute("""SELECT id,api_key_id,provider,model,prompt_tokens,completion_tokens,total_tokens,
+            cost_usd,latency_ms,status,created_at FROM usage_events WHERE workspace_id=?
+            ORDER BY created_at DESC LIMIT ?""", (request.state.workspace_id, limit)).fetchall()
+    return {"events": [dict(row) for row in rows]}
