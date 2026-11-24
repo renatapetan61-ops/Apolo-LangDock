@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+import httpx
 
 
 class MCPRuntimeError(RuntimeError):
@@ -51,15 +52,18 @@ def stdio_config(config_key: str) -> dict:
 
 
 @asynccontextmanager
-async def open_session(transport: str, endpoint: str | None = None, config_key: str | None = None):
+async def open_session(transport: str, endpoint: str | None = None, config_key: str | None = None, bearer_token: str | None = None):
     if transport == "streamable-http":
         if not endpoint:
             raise MCPRuntimeError("An HTTP endpoint is required.")
         validate_http_endpoint(endpoint)
-        async with streamable_http_client(endpoint) as (read_stream, write_stream, _session_id):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                yield session
+        headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else {}
+        timeout = httpx.Timeout(300.0, connect=20.0)
+        async with httpx.AsyncClient(headers=headers, timeout=timeout) as http_client:
+            async with streamable_http_client(endpoint, http_client=http_client) as (read_stream, write_stream, _session_id):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    yield session
         return
     if transport == "stdio":
         if not config_key:
@@ -74,8 +78,8 @@ async def open_session(transport: str, endpoint: str | None = None, config_key: 
     raise MCPRuntimeError("Unsupported MCP transport.")
 
 
-async def discover_tools(transport: str, endpoint: str | None = None, config_key: str | None = None) -> list[dict]:
-    async with open_session(transport, endpoint, config_key) as session:
+async def discover_tools(transport: str, endpoint: str | None = None, config_key: str | None = None, bearer_token: str | None = None) -> list[dict]:
+    async with open_session(transport, endpoint, config_key, bearer_token) as session:
         result = await session.list_tools()
         tools = []
         for item in result.tools:
@@ -88,8 +92,8 @@ async def discover_tools(transport: str, endpoint: str | None = None, config_key
 
 
 async def invoke_tool(transport: str, tool_name: str, arguments: dict, endpoint: str | None = None,
-                      config_key: str | None = None) -> dict:
-    async with open_session(transport, endpoint, config_key) as session:
+                      config_key: str | None = None, bearer_token: str | None = None) -> dict:
+    async with open_session(transport, endpoint, config_key, bearer_token) as session:
         result = await session.call_tool(tool_name, arguments=arguments)
         content = []
         for item in result.content[:32]:
