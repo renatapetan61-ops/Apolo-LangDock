@@ -24,7 +24,8 @@
 - [x] Login/register and workspace selection in the web UI
 - [x] Scoped public API keys with one-time secret display, expiry, and revocation
 - [x] Per-key request throttling and workspace audit log foundation
-- [ ] Roles, email verification, advanced rate limiting, and secrets management for provider credentials
+- [x] Workspace RBAC roles (owner/admin/member), membership administration, and owner protection
+- [ ] Email verification, advanced rate limiting, and secrets management for provider credentials
 - [ ] Database migrations and backups
 
 ## Milestone 3 — Agents and tools
