@@ -421,6 +421,7 @@ async def chat_stream(request: ChatRequest, http_request: Request):
 
 # Identity and workspace foundation. Tokens are opaque, stored only as SHA-256 hashes.
 import hashlib as _hashlib
+import hmac as _hmac
 import secrets as _secrets
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -523,7 +524,7 @@ async def enforce_identity_and_workspace(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Session invalid or expired."})
         request.state.user_id = row["id"]
         scoped = (path.startswith("/api/v1/conversations") or path.startswith("/api/v1/agents")
-                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/") or path.startswith("/api/v1/api-keys") or path.startswith("/api/v1/audit-logs") or path.startswith("/api/v1/usage/") or path.startswith("/api/v1/workspace/"))
+                  or path.startswith("/api/v1/workflows") or path.startswith("/api/v1/workflow-runs") or path.startswith("/api/v1/agent-runs") or path.startswith("/api/v1/chat/") or path.startswith("/api/v1/mcp/") or path.startswith("/api/v1/api-keys") or path.startswith("/api/v1/audit-logs") or path.startswith("/api/v1/usage/") or path.startswith("/api/v1/workspace/") or path.startswith("/api/v1/webhooks/") or path == "/api/v1/webhooks")
         if scoped:
             workspace_id = request.headers.get("x-workspace-id", "").strip()
             if not workspace_id:
@@ -993,6 +994,17 @@ with _db() as conn:
       route TEXT NOT NULL, model TEXT, created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_api_key_requests_window ON api_key_requests(key_id,created_at);
+    CREATE TABLE IF NOT EXISTS webhook_endpoints(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL,
+      secret_ciphertext TEXT NOT NULL, events TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS webhook_deliveries(
+      id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, webhook_id TEXT NOT NULL, event_type TEXT NOT NULL,
+      payload TEXT NOT NULL, status_code INTEGER, response_excerpt TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT, delivered_at TEXT, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_endpoint ON webhook_deliveries(webhook_id,created_at);
     CREATE TABLE IF NOT EXISTS audit_logs(
       id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, actor_user_id TEXT,
       action TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT,
@@ -1009,7 +1021,15 @@ with _db() as conn:
       workspace_id TEXT PRIMARY KEY, monthly_token_limit INTEGER, monthly_request_limit INTEGER,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS api_key_usage_limits(
+      key_id TEXT PRIMARY KEY, monthly_token_limit INTEGER, monthly_request_limit INTEGER, updated_at TEXT NOT NULL
+    );
     """)
+        api_key_columns = {row[1] for row in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+        if "monthly_token_limit" not in api_key_columns:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_token_limit INTEGER")
+        if "monthly_request_limit" not in api_key_columns:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN monthly_request_limit INTEGER")
 
 
 def _audit(workspace_id: str, actor_user_id: str | None, action: str,
@@ -1163,8 +1183,10 @@ def _check_workspace_quota(request: Request):
     workspace_id = getattr(request.state, "workspace_id", None)
     if not workspace_id:
         return
+    api_key_id = getattr(request.state, "api_key_id", None)
     with _db() as conn:
         limits = conn.execute("SELECT * FROM workspace_usage_limits WHERE workspace_id=?", (workspace_id,)).fetchone()
+        key_limits = conn.execute("SELECT * FROM api_key_usage_limits WHERE key_id=?", (api_key_id,)).fetchone() if api_key_id else None
         if not limits:
             return
         since = _month_start()
@@ -1175,6 +1197,15 @@ def _check_workspace_quota(request: Request):
         raise HTTPException(status_code=429, detail="Workspace monthly request quota reached.")
     if limits["monthly_token_limit"] is not None and row["tokens"] >= limits["monthly_token_limit"]:
         raise HTTPException(status_code=429, detail="Workspace monthly token quota reached.")
+    if key_limits:
+        with _db() as conn:
+            key_row = conn.execute("""SELECT COUNT(*) AS requests,COALESCE(SUM(total_tokens),0) AS tokens
+                FROM usage_events WHERE api_key_id=? AND created_at>=? AND status='succeeded'""",
+                (api_key_id, since)).fetchone()
+        if key_limits["monthly_request_limit"] is not None and key_row["requests"] >= key_limits["monthly_request_limit"]:
+            raise HTTPException(status_code=429, detail="API key monthly request quota reached.")
+        if key_limits["monthly_token_limit"] is not None and key_row["tokens"] >= key_limits["monthly_token_limit"]:
+            raise HTTPException(status_code=429, detail="API key monthly token quota reached.")
 
 
 def _record_usage(request: Request, model_id: str, provider: str, usage: dict,
@@ -1330,3 +1361,159 @@ def _require_workspace_role(request: Request, allowed_roles: set[str]):
                            (request.state.workspace_id, request.state.user_id)).fetchone()
     if not row or row["role"] not in allowed_roles:
         raise HTTPException(status_code=403, detail="Insufficient workspace role for this operation.")
+
+
+@app.put("/api/v1/api-keys/{key_id}/limits")
+async def update_api_key_limits(key_id: str, payload: dict = Body(...), request: Request = None):
+    _require_workspace_role(request, {"owner", "admin"})
+    token_limit, request_limit = payload.get("monthly_token_limit"), payload.get("monthly_request_limit")
+    for value in (token_limit, request_limit):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+            raise HTTPException(status_code=422, detail="Quota limits must be positive integers or null.")
+    with _db() as conn:
+        exists = conn.execute("SELECT 1 FROM api_keys WHERE id=? AND workspace_id=?",
+                              (key_id, request.state.workspace_id)).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="API key not found.")
+        conn.execute("""INSERT INTO api_key_usage_limits(key_id,monthly_token_limit,monthly_request_limit,updated_at)
+            VALUES(?,?,?,?) ON CONFLICT(key_id) DO UPDATE SET
+            monthly_token_limit=excluded.monthly_token_limit,monthly_request_limit=excluded.monthly_request_limit,
+            updated_at=excluded.updated_at""", (key_id, token_limit, request_limit, _now()))
+    _audit(request.state.workspace_id, request.state.user_id, "api_key.limits.updated", "api_key",
+           key_id, {"monthly_token_limit": token_limit, "monthly_request_limit": request_limit})
+    return {"key_id": key_id, "monthly_token_limit": token_limit, "monthly_request_limit": request_limit}
+
+
+@app.get("/api/v1/api-keys/{key_id}/usage")
+async def api_key_usage(key_id: str, request: Request):
+    with _db() as conn:
+        exists = conn.execute("SELECT 1 FROM api_keys WHERE id=? AND workspace_id=?",
+                              (key_id, request.state.workspace_id)).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="API key not found.")
+        limits = conn.execute("SELECT * FROM api_key_usage_limits WHERE key_id=?", (key_id,)).fetchone()
+        totals = conn.execute("""SELECT COUNT(*) AS requests,COALESCE(SUM(total_tokens),0) AS tokens,
+            SUM(cost_usd) AS reported_cost_usd FROM usage_events
+            WHERE api_key_id=? AND created_at>=? AND status='succeeded'""",
+            (key_id, _month_start())).fetchone()
+    return {"key_id": key_id, "period_start": _month_start(), "totals": dict(totals),
+            "limits": dict(limits) if limits else {"monthly_token_limit": None, "monthly_request_limit": None}}
+
+
+def _webhook_url(value: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(value)
+    allowed = {host.strip().lower() for host in os.getenv("WEBHOOK_ALLOWED_HOSTS", "").split(",") if host.strip()}
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise HTTPException(status_code=422, detail="Webhook URL must be HTTPS without credentials, query, or fragment.")
+    if not allowed or parsed.hostname.lower() not in allowed:
+        raise HTTPException(status_code=400, detail="Webhook host is not in WEBHOOK_ALLOWED_HOSTS.")
+    if parsed.port not in (None, 443):
+        raise HTTPException(status_code=422, detail="Webhook URL must use the default HTTPS port.")
+    return value
+
+
+@app.post("/api/v1/webhooks")
+async def create_webhook(payload: dict = Body(...), request: Request = None):
+    _require_workspace_role(request, {"owner", "admin"})
+    name, url, secret = payload.get("name"), payload.get("url"), payload.get("secret")
+    events = payload.get("events", ["api_key.created", "api_key.revoked", "usage.recorded"])
+    allowed_events = {"api_key.created", "api_key.revoked", "usage.recorded", "mcp.tool.called"}
+    if not isinstance(name, str) or not name.strip() or len(name) > 100:
+        raise HTTPException(status_code=422, detail="Webhook name is required (max 100 characters).")
+    if not isinstance(secret, str) or len(secret) < 24 or len(secret) > 512:
+        raise HTTPException(status_code=422, detail="Webhook signing secret must contain 24–512 characters.")
+    if not isinstance(events, list) or not events or len(events) > len(allowed_events) or not all(isinstance(x, str) and x in allowed_events for x in events) or len(set(events)) != len(events):
+        raise HTTPException(status_code=422, detail="Webhook events contain unsupported or duplicate event names.")
+    safe_url = _webhook_url(str(url or ""))
+    try:
+        ciphertext = _mcp_encrypt_secret(secret)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Configure APOLO_MCP_ENCRYPTION_KEY before storing webhook secrets.") from exc
+    webhook_id, now = str(uuid.uuid4()), _now()
+    with _db() as conn:
+        conn.execute("""INSERT INTO webhook_endpoints(id,workspace_id,name,url,secret_ciphertext,events,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)""",
+            (webhook_id, request.state.workspace_id, name.strip(), safe_url, ciphertext, _json.dumps(events), now, now))
+    _audit(request.state.workspace_id, request.state.user_id, "webhook.created", "webhook", webhook_id,
+           {"name": name.strip(), "events": events, "host": __import__("urllib.parse", fromlist=["urlparse"]).urlparse(safe_url).hostname})
+    return {"id": webhook_id, "name": name.strip(), "url": safe_url, "events": events, "active": True}
+
+
+@app.get("/api/v1/webhooks")
+async def list_webhooks(request: Request):
+    with _db() as conn:
+        rows = conn.execute("SELECT id,name,url,events,active,created_at,updated_at FROM webhook_endpoints WHERE workspace_id=? ORDER BY created_at DESC",
+                            (request.state.workspace_id,)).fetchall()
+    return {"webhooks": [{**dict(row), "events": _json.loads(row["events"]), "active": bool(row["active"])} for row in rows]}
+
+
+@app.delete("/api/v1/webhooks/{webhook_id}")
+async def delete_webhook(webhook_id: str, request: Request):
+    _require_workspace_role(request, {"owner", "admin"})
+    with _db() as conn:
+        result = conn.execute("DELETE FROM webhook_endpoints WHERE id=? AND workspace_id=?",
+                              (webhook_id, request.state.workspace_id))
+        conn.execute("DELETE FROM webhook_deliveries WHERE webhook_id=? AND workspace_id=?",
+                     (webhook_id, request.state.workspace_id))
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Webhook not found.")
+    _audit(request.state.workspace_id, request.state.user_id, "webhook.deleted", "webhook", webhook_id)
+    return {"deleted": True, "id": webhook_id}
+
+
+async def _deliver_webhook(webhook_id: str, workspace_id: str, event_type: str, payload: dict) -> dict:
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM webhook_endpoints WHERE id=? AND workspace_id=? AND active=1",
+                           (webhook_id, workspace_id)).fetchone()
+    if not row or event_type not in _json.loads(row["events"]):
+        return {"skipped": True}
+    delivery_id, now = str(uuid.uuid4()), _now()
+    envelope = {"id": delivery_id, "type": event_type, "created_at": now, "data": payload}
+    body = _json.dumps(envelope, separators=(",", ":"), sort_keys=True)
+    secret = _mcp_decrypt_secret(row["secret_ciphertext"])
+    signature = _hashlib.sha256(body.encode()).hexdigest()
+    signed = _hmac.new(secret.encode(), body.encode(), _hashlib.sha256).hexdigest()
+    status, excerpt, delivered = None, None, None
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            response = await client.post(row["url"], content=body,
+                headers={"Content-Type": "application/json", "X-APOLO-Event": event_type,
+                         "X-APOLO-Delivery": delivery_id, "X-APOLO-Signature": "sha256=" + signed})
+        status, excerpt = response.status_code, response.text[:1000]
+        if 200 <= status < 300:
+            delivered = _now()
+    except httpx.HTTPError as exc:
+        excerpt = type(exc).__name__
+    with _db() as conn:
+        conn.execute("""INSERT INTO webhook_deliveries(id,workspace_id,webhook_id,event_type,payload,status_code,
+            response_excerpt,attempts,next_attempt_at,delivered_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (delivery_id, workspace_id, webhook_id, event_type, body, status, excerpt, 1,
+             None if delivered else _now(), delivered, now))
+    return {"id": delivery_id, "status_code": status, "delivered": bool(delivered)}
+
+
+@app.post("/api/v1/webhooks/{webhook_id}/test")
+async def test_webhook(webhook_id: str, request: Request):
+    _require_workspace_role(request, {"owner", "admin"})
+    result = await _deliver_webhook(webhook_id, request.state.workspace_id, "test.ping", {"message": "APOLO webhook test"})
+    if result.get("skipped"):
+        raise HTTPException(status_code=404, detail="Active webhook not found or test event not subscribed.")
+    _audit(request.state.workspace_id, request.state.user_id, "webhook.tested", "webhook", webhook_id,
+           {"delivery_id": result["id"], "delivered": result["delivered"], "status_code": result["status_code"]})
+    return result
+
+
+@app.get("/api/v1/webhooks/{webhook_id}/deliveries")
+async def list_webhook_deliveries(webhook_id: str, request: Request, limit: int = 50):
+    if not 1 <= limit <= 200:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200.")
+    with _db() as conn:
+        exists = conn.execute("SELECT 1 FROM webhook_endpoints WHERE id=? AND workspace_id=?",
+                              (webhook_id, request.state.workspace_id)).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Webhook not found.")
+        rows = conn.execute("""SELECT id,event_type,status_code,response_excerpt,attempts,next_attempt_at,
+            delivered_at,created_at FROM webhook_deliveries WHERE webhook_id=? AND workspace_id=?
+            ORDER BY created_at DESC LIMIT ?""", (webhook_id, request.state.workspace_id, limit)).fetchall()
+    return {"deliveries": [dict(row) for row in rows]}
