@@ -72,3 +72,27 @@ def test_agent_and_workflow_registry():
     workflow = client.post("/api/v1/workflows", json={"name":"Fluxo de teste","definition":{"nodes":[],"edges":[]}})
     assert workflow.status_code == 200
     assert any(item["id"] == workflow.json()["id"] for item in client.get("/api/v1/workflows").json()["workflows"])
+
+
+def test_register_login_and_workspace_membership():
+    email = f"user-{__import__('uuid').uuid4().hex[:10]}@example.test"
+    password = "Correct-Horse-Battery-42!"
+    registered = client.post("/api/v1/auth/register", json={"email":email,"password":password})
+    assert registered.status_code == 200
+    token = registered.json()["access_token"]
+    headers = {"Authorization":f"Bearer {token}"}
+    assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
+    created = client.post("/api/v1/workspaces", headers=headers, json={"name":"Equipe APOLO"})
+    assert created.status_code == 200
+    listed = client.get("/api/v1/workspaces", headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()["workspaces"][0]["name"] == "Equipe APOLO"
+    assert client.get("/api/v1/workspaces").status_code == 401
+    logged_in = client.post("/api/v1/auth/login", json={"email":email,"password":password})
+    assert logged_in.status_code == 200
+    assert client.post("/api/v1/auth/login", json={"email":email,"password":"wrong-password"}).status_code == 401
+
+def test_stream_endpoint_requires_provider_credentials(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    response = client.post("/api/v1/chat/stream", json={"model":"openai/gpt-test","messages":[{"role":"user","content":"hello"}]})
+    assert response.status_code == 503
