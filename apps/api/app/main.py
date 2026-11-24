@@ -1617,6 +1617,8 @@ async def start_mcp_oauth(server_id: str, request: Request):
     if not client_id or not redirect_uri:
         raise HTTPException(status_code=503, detail="Configure APOLO_MCP_OAUTH_CLIENT_ID and APOLO_MCP_OAUTH_REDIRECT_URI for a pre-registered public OAuth client.")
     _oauth_https_url(redirect_uri, "redirect URI")
+    if urlparse(redirect_uri).path != "/api/v1/mcp/oauth/callback":
+        raise HTTPException(status_code=422, detail="OAuth redirect URI path must be /api/v1/mcp/oauth/callback.")
     with _db() as conn:
         server = conn.execute("SELECT * FROM mcp_servers WHERE id=? AND workspace_id=?",
                               (server_id, request.state.workspace_id)).fetchone()
@@ -1668,6 +1670,8 @@ async def mcp_oauth_callback(code: str | None = None, state: str | None = None,
         with _db() as conn:
             conn.execute("UPDATE mcp_oauth_transactions SET consumed_at=? WHERE id=?", (_now(), tx["id"]))
         raise HTTPException(status_code=400, detail="OAuth authorization was denied by the authorization server.")
+    if iss is not None and iss != tx["issuer"]:
+        raise HTTPException(status_code=400, detail="OAuth authorization response issuer does not match the discovered issuer.")
     if tx["issuer_response_required"] and iss != tx["issuer"]:
         raise HTTPException(status_code=400, detail="OAuth authorization response issuer does not match the discovered issuer.")
     if not code or len(code) > 4096:
